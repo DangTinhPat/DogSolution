@@ -1,0 +1,18 @@
+#pragma once
+
+#include <string>
+
+namespace megadog_legged_interface {
+
+// Path to this package's source directory (config files, etc.).
+inline std::string getSourcePath() {
+  return "@CMAKE_CURRENT_SOURCE_DIR@";
+}
+
+// Absolute path to the URDF generated at build time by CMakeLists.txt's
+// xacro custom command.
+inline std::string getGeneratedUrdfPath() {
+  return "@MEGADOG_A1_GENERATED_URDF_PATH@";
+}
+
+}  // namespace megadog_legged_interface

@@ -1,0 +1,96 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robot">
+
+    <xacro:arg name="robot_type" default="a1"/>
+    <!-- Passed by sim.launch.py; consumed by common/gazebo.xacro to locate
+         controllers.yaml for gz_ros2_control. -->
+    <xacro:arg name="megadog_share" default=""/>
+    <!-- Absolute path to this package's own root (source tree or install
+         share dir) - used for all $(find megadog_description) equivalents
+         below instead of xacro's own $(find), so this file can be processed
+         without megadog_description being ament-indexed yet (avoids a
+         colcon ordering dependency, same reasoning as babyDog's
+         main_bot_share/robot.urdf.xacro). Callers (sim.launch.py,
+         megadog_legged_interface's CMakeLists.txt) must pass this
+         explicitly; there is no usable default. -->
+    <xacro:arg name="megadog_description_share" default=""/>
+
+    <xacro:include filename="$(arg megadog_description_share)/urdf/common/materials.xacro"/>
+    <xacro:include filename="$(arg megadog_description_share)/urdf/common/leg.xacro"/>
+    <xacro:include filename="$(arg megadog_description_share)/urdf/common/gazebo.xacro"/>
+    <xacro:include filename="$(arg megadog_description_share)/urdf/common/imu.xacro"/>
+
+    <xacro:include filename="$(arg megadog_description_share)/urdf/$(arg robot_type)/const.xacro"/>
+
+<!--    <xacro:property name="mesh_path" value="../meshes"/>-->
+    <!-- file:// prefix required for RViz's RobotModel display (resource_retriever
+         needs an explicit URI scheme to resolve a mesh path - a bare absolute
+         path silently fails to load there, even though Gazebo/SDF accepts
+         bare paths fine, which is why the mesh always rendered correctly in
+         Gazebo but never in RViz). -->
+    <xacro:property name="mesh_path" value="file://$(arg megadog_description_share)/meshes/$(arg robot_type)"/>
+
+    <link name="base">
+        <!-- devq/babyDog's real base_link.STL (meshes/a1/base_link.STL,
+             copied from babyDog's main_bot/description/meshes/devq/) -
+             already at devq's real scale, matching const.xacro's now
+             devq-derived dimensions, so scale="1 1 1" as-is. Replaces the
+             earlier primitive-box placeholder (see the megaDog port plan
+             breezy-purring-moler.md) now that real mesh art was requested.
+             Mesh origin kept at "0 0 0" like babyDog's own babydog.xacro use
+             of it - if it renders rotated relative to the collision box
+             (devq's joint frames bake in rotations this file's zero-rpy
+             joints don't, see the plan's "angle conventions" note), a
+             compensating <origin rpy=.../> may be needed after visual
+             inspection in sim. -->
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${mesh_path}/base_link.STL" scale="1 1 1"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <box size="${trunk_length} ${trunk_width} ${trunk_height}"/>
+            </geometry>
+        </collision>
+        <inertial>
+            <origin rpy="0 0 0" xyz="${trunk_com_x} ${trunk_com_y} ${trunk_com_z}"/>
+            <mass value="${trunk_mass}"/>
+            <inertia
+                    ixx="${trunk_ixx}" ixy="${trunk_ixy}" ixz="${trunk_ixz}"
+                    iyy="${trunk_iyy}" iyz="${trunk_iyz}"
+                    izz="${trunk_izz}"/>
+        </inertial>
+    </link>
+
+    <xacro:IMU connected_to="base" imu_name="base_imu" xyz="0. 0. 0." rpy="0. 0. 0."/>
+
+
+    <!-- HAA origin rpy is devq/babyDog's real abad_joint roll offset (see
+         babydog.xacro: left legs +0.36 rad, right legs -0.36 rad) - carried
+         over exactly (not zero, unlike the old A1-derived origins) now that
+         megaDog's own HAA/HFE/KFE joints use devq's real geometry with
+         megaDog's own LF/LH/RF/RH naming, see the megaDog port plan
+         (breezy-purring-moler.md, "take A1's names for devq's real joints"
+         revision). -->
+    <xacro:leg prefix="LF" mesh_path="${mesh_path}" mirror="1" mirror_dae="True" front_hind="1" front_hind_dae="True">
+        <origin rpy="0.36 0 0" xyz="${leg_offset_x} ${leg_offset_y} 0"/>
+    </xacro:leg>
+
+    <xacro:leg prefix="LH" mesh_path="${mesh_path}" mirror="1" mirror_dae="True" front_hind="-1" front_hind_dae="False">
+        <origin rpy="0.36 0 0" xyz="${-leg_offset_x} ${leg_offset_y} 0"/>
+    </xacro:leg>
+
+    <xacro:leg prefix="RF" mesh_path="${mesh_path}" mirror="-1" mirror_dae="False" front_hind="1" front_hind_dae="True">
+        <origin rpy="-0.36 0 0" xyz="${leg_offset_x} ${-leg_offset_y} 0"/>
+    </xacro:leg>
+
+    <xacro:leg prefix="RH" mesh_path="${mesh_path}" mirror="-1" mirror_dae="False" front_hind="-1" front_hind_dae="False">
+        <origin rpy="-0.36 0 0" xyz="${-leg_offset_x} ${-leg_offset_y} 0"/>
+    </xacro:leg>
+
+</robot>

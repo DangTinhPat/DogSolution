@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<!-- Milestone 1: bare bring-up only. Replaces the original ROS1
+     gazebo_ros_control + liblegged_hw_sim.so + libgazebo_ros_p3d.so plugin
+     block with ros2_control + gz_ros2_control (Gazebo Harmonic). Every joint
+     exports "effort" as its only command interface - matching babyDog's own
+     babydog.ros2_control.xacro "gazebo" branch - because there is no
+     locomotion controller yet; a future PD+feedforward controller (mirroring
+     babyDog's leg_pd_controller) will claim these the same way. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:macro name="megadog_ros2_control_joint" params="name initial_position:=0.0">
+        <joint name="${name}">
+            <command_interface name="effort"><param name="initial_value">0.0</param></command_interface>
+            <!-- BabyDog convention: joint zero is the natural prone HOME pose;
+                 stand/trot targets are separate controller/OCS2 references. -->
+            <state_interface name="position"><param name="initial_value">${initial_position}</param></state_interface>
+            <state_interface name="velocity"/>
+            <state_interface name="effort"/>
+        </joint>
+    </xacro:macro>
+
+    <ros2_control name="GazeboSimSystem" type="system">
+        <hardware>
+            <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+        </hardware>
+        <xacro:megadog_ros2_control_joint name="LF_HAA" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="LF_HFE" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="LF_KFE" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="LH_HAA" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="LH_HFE" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="LH_KFE" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="RF_HAA" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="RF_HFE" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="RF_KFE" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="RH_HAA" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="RH_HFE" initial_position="0.0"/>
+        <xacro:megadog_ros2_control_joint name="RH_KFE" initial_position="0.0"/>
+    </ros2_control>
+
+    <gazebo>
+        <plugin filename="libgz_ros2_control-system.so"
+                name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+            <!-- megadog_share is declared by robot.xacro's including launch file
+                 via a top-level xacro:arg - see sim.launch.py. -->
+            <parameters>$(arg megadog_share)/config/controllers.yaml</parameters>
+        </plugin>
+    </gazebo>
+
+</robot>

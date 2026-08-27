@@ -1,0 +1,28 @@
+# colcon / ROS 2 workspace outputs
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# VS Code C/C++ extension index cache
+.vscode/browse.vc.db
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Claude Code / Codex local configuration
+.claude/
+.codex/
+.agents/
+AGENTS.md
+
+# Local session snapshot
+CONTEXT.md

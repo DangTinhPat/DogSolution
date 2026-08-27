@@ -1,0 +1,9 @@
+<library path="megadog_controller">
+    <class name="megadog_controller/MegadogController"
+           type="megadog_controller::MegadogController"
+           base_class_type="controller_interface::ControllerInterface">
+        <description>
+            OCS2 SqpMpc + HierarchicalWbc locomotion controller for A1 (megaDog Milestone 4).
+        </description>
+    </class>
+</library>

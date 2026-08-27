@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>gui</name>
+  <version>0.0.0</version>
+  <description>Tkinter control panel for starting/stopping megadog_description's Gazebo sim and RViz (OCS2 desired/optimized trajectory + contact markers from megadog_wbc), and clearing leftover gz/ros processes, instead of juggling several terminals by hand. Ported from babyDog's gui package, trimmed to Sim/RViz/Kill/Shutdown - megaDog has no FSM command message, joystick_bridge, or real-hardware backend yet.</description>
+  <maintainer email="dangtinh.ftcpy@gmail.com">dvt</maintainer>
+  <license>TODO: License declaration</license>
+
+  <exec_depend>python3-tk</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>megadog_description</exec_depend>
+  <exec_depend>python3-psutil</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

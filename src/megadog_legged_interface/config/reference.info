@@ -1,0 +1,49 @@
+targetDisplacementVelocity          0.3;
+targetRotationVelocity              0.1;
+
+comHeight                           0.22
+
+; BabyDog-style joint convention: HOME/spawn is all joint zeros, with hip/knee
+; pitch offsets baked into the URDF joint origins. This defaultJointState is
+; the tuned stand/trot nominal pose expressed in that convention.
+defaultJointState
+{
+   (0,0)  -0.30       ; LF_HAA
+   (1,0)   0.574027   ; LF_HFE
+   (2,0)  -1.37275    ; LF_KFE
+   (3,0)  -0.30       ; LH_HAA
+   (4,0)   0.574027   ; LH_HFE
+   (5,0)  -1.37275    ; LH_KFE
+   (6,0)   0.30       ; RF_HAA
+   (7,0)   0.574027   ; RF_HFE
+   (8,0)  -1.37275    ; RF_KFE
+   (9,0)   0.30       ; RH_HAA
+   (10,0)  0.574027   ; RH_HFE
+   (11,0) -1.37275    ; RH_KFE
+}
+
+initialModeSchedule
+{
+  modeSequence
+  {
+    [0]  STANCE
+    [1]  STANCE
+  }
+  eventTimes
+  {
+    [0]  0.5
+  }
+}
+
+defaultModeSequenceTemplate
+{
+  modeSequence
+  {
+    [0]  STANCE
+  }
+  switchingTimes
+  {
+    [0]  0.0
+    [1]  1.0
+  }
+}

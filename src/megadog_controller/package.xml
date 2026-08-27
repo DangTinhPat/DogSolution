@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>megadog_controller</name>
+  <version>0.0.1</version>
+  <description>
+    Milestone 4 of the megaDog port: single ros2_control ControllerInterface
+    wiring megadog_wbc's MegadogWbcRuntime (OCS2 SqpMpc + HierarchicalWbc)
+    directly to A1's "effort" command interface, modeled on
+    qiayuanl/legged_control's own LeggedController (kp=0, kd=3 joint-level
+    PD, computed here since there is no separate low-level PD controller).
+  </description>
+  <maintainer email="dvt@example.com">dvt</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>controller_interface</depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>tf2_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>megadog_wbc</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <controller_interface plugin="${prefix}/megadog_controller.xml"/>
+  </export>
+</package>

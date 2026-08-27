@@ -1,0 +1,12 @@
+# Milestone 4: megadog_controller (OCS2 SqpMpc + HierarchicalWbc) claims
+# every joint's "effort" command interface (see urdf/common/gazebo.xacro).
+# joint_state_broadcaster from Milestone 1 stays for /joint_states + TF.
+controller_manager:
+  ros__parameters:
+    update_rate: 1000
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    megadog_controller:
+      type: megadog_controller/MegadogController

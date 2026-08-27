@@ -1,0 +1,150 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="a1_description">
+
+    <!-- Constants for robot dimensions -->
+    <xacro:property name="stick_mass" value="0.00001"/>
+
+    <!-- simplified collision value -->
+    <!-- trunk box matches devq's body collision box (babydog.xacro
+         <collision><box size="0.20 0.19 0.1076">) directly. Hip/thigh/calf
+         cross-sections have no such 1:1 devq equivalent (devq's own
+         collision there is mesh-based, not a simple primitive) - scaled
+         from A1's own values by 0.75 (= new thigh/calf_length 0.15 / old
+         0.2), the same uniform linear scale factor used for the inertia
+         approximation below, to keep the leg's proportions consistent. -->
+    <xacro:property name="trunk_width" value="0.19"/>
+    <xacro:property name="trunk_length" value="0.20"/>
+    <xacro:property name="trunk_height" value="0.1076"/>
+    <!-- hip/thigh/calf collision primitives resized to bound devq's real
+         mesh (abad_link/hip_link/knee_link.STL bounding-box extents), not
+         the leftover A1-scaled (0.75x) approximation these used to be -
+         that undersized calf collision box (was 0.012 vs. the real mesh's
+         ~0.05/0.03 cross-section) let the visual mesh clip through the
+         ground under HOME's zero-effort rest, since the physics engine only
+         ever saw the (much thinner) collision box resting on the floor. -->
+    <xacro:property name="hip_radius" value="0.05"/>
+    <xacro:property name="hip_length" value="0.05"/>
+    <xacro:property name="thigh_shoulder_radius" value="0.04"/>
+    <xacro:property name="thigh_shoulder_length" value="0.04"/>
+    <xacro:property name="thigh_shoulder_y_offset" value="-0.006"/>
+
+    <xacro:property name="thigh_width" value="0.045"/>
+    <xacro:property name="thigh_height" value="0.045"/>
+    <xacro:property name="thigh_x_offset" value="-0.01125"/>
+    <xacro:property name="calf_width" value="0.035"/>
+    <xacro:property name="calf_height" value="0.035"/>
+    <xacro:property name="calf_x_offset" value="0.0"/>
+    <xacro:property name="foot_radius" value="0.0205"/>
+
+    <!-- kinematic value -->
+    <!-- devq (babyDog) hip/knee origin-to-origin distances (0.15m each,
+         babydog.xacro's hip_joint/knee_joint xyz z=-0.15) - see the megaDog
+         port plan's "swap A1 mechanical config for babyDog's devq
+         dimensions" (breezy-purring-moler.md). thigh_offset (hip Y-offset,
+         devq's hip_joint origin y=0.077) and leg_offset_x/y below use devq's
+         abad_joint origin xyz directly - these are frame-position values,
+         not angle-convention-dependent, so they transfer as-is. -->
+    <xacro:property name="thigh_offset" value="0.077"/>
+    <xacro:property name="thigh_length" value="0.15"/>
+    <xacro:property name="calf_length" value="0.15"/>
+
+    <!-- leg offset from trunk center value -->
+    <xacro:property name="leg_offset_x" value="0.176"/>
+    <xacro:property name="leg_offset_y" value="0.0525"/>
+    <xacro:property name="trunk_offset_z" value="0.01675"/>
+    <xacro:property name="hip_offset" value="0.065"/>
+
+    <!-- joint limits -->
+    <xacro:property name="damping" value="0"/>
+    <xacro:property name="friction" value="0"/>
+    <!-- Position limits follow babyDog's joint-zero HOME convention. The
+         non-zero HFE/KFE joint-origin rpy offsets live in leg.xacro, so joint
+         position 0.0 is the natural prone pose rather than an upright stand
+         command. hip_position_min/max
+         still feed the existing mirror_dae==True/False branch in leg.xacro's
+         HAA <limit> (left leg: lower=hip_position_min, upper=hip_position_max;
+         right leg: lower=-hip_position_max, upper=-hip_position_min) -
+         devq.urdf's abad_joint limit is symmetric (-1.134,1.134) on every
+         leg, so both branches evaluate to the same range, which is correct.
+         Torque is intentionally raised for simulation debug so WBC/NMPC
+         behavior is not hidden by actuator saturation. Velocity 16.29 rad/s
+         matches devq.urdf's own <limit velocity=>. -->
+    <xacro:property name="hip_position_max" value="1.134"/>
+    <xacro:property name="hip_position_min" value="-1.134"/>
+    <xacro:property name="hip_velocity_max" value="16.29"/>
+    <xacro:property name="hip_torque_max" value="80.0"/>
+    <xacro:property name="thigh_position_max" value="4.03"/>
+    <xacro:property name="thigh_position_min" value="-1.903"/>
+    <xacro:property name="thigh_velocity_max" value="16.29"/>
+    <xacro:property name="thigh_torque_max" value="80.0"/>
+    <xacro:property name="calf_position_max" value="0.0"/>
+    <xacro:property name="calf_position_min" value="-2.269"/>
+    <xacro:property name="calf_velocity_max" value="16.29"/>
+    <xacro:property name="calf_torque_max" value="80.0"/>
+
+    <!-- dynamics inertial value -->
+    <!-- trunk - devq's real body inertia (babydog.xacro's "body" link
+         <inertial>), same root-link convention as this file's "base" (both
+         zero-rotation at the robot root), so no frame-orientation mismatch
+         here - copied directly. -->
+    <xacro:property name="trunk_mass" value="2.571164339"/>
+    <xacro:property name="trunk_com_x" value="-0.00091406"/>
+    <xacro:property name="trunk_com_y" value="-0.001375573"/>
+    <xacro:property name="trunk_com_z" value="-0.001298396475"/>
+    <xacro:property name="trunk_ixx" value="0.0063721225"/>
+    <xacro:property name="trunk_ixy" value="-0.0000632938"/>
+    <xacro:property name="trunk_ixz" value="-0.0000089136"/>
+    <xacro:property name="trunk_iyy" value="0.0191754101"/>
+    <xacro:property name="trunk_iyz" value="0.0000201465"/>
+    <xacro:property name="trunk_izz" value="0.0234706047"/>
+
+    <!-- hip/thigh/calf - devq's joint-frame rotation offsets (see the
+         megaDog port plan) mean its raw per-axis inertia numbers don't
+         transfer 1:1 onto this file's differently-oriented frames. Instead:
+         A1's own inertia tensor scaled by (devq_mass/A1_mass) *
+         (devq_length/A1_length)^2 per link - a standard geometric-similarity
+         approximation (mass and length-squared are the two factors inertia
+         scales with), not exact CAD data. Expect to retune during WBC gain
+         tuning if this proves off. COM offsets scaled by length ratio only
+         (0.75 = 0.15/0.2 thigh/calf, applied uniformly to hip too). -->
+    <!-- hip (left front) - scale factor 0.42309 (mass 0.75216 * length^2 0.5625) -->
+    <xacro:property name="hip_mass" value="0.447529613"/>
+    <xacro:property name="hip_com_x" value="-0.002906"/>
+    <xacro:property name="hip_com_y" value="0.0012165"/>
+    <xacro:property name="hip_com_z" value="0.0000315"/>
+    <xacro:property name="hip_ixx" value="0.0001704"/>
+    <xacro:property name="hip_ixy" value="-0.0000036847"/>
+    <xacro:property name="hip_ixz" value="-0.0000001257"/>
+    <xacro:property name="hip_iyy" value="0.0002924"/>
+    <xacro:property name="hip_iyz" value="-0.0000002306"/>
+    <xacro:property name="hip_izz" value="0.0002064"/>
+
+    <!-- thigh - scale factor 0.33361 (mass 0.59309 * length^2 0.5625) -->
+    <xacro:property name="thigh_mass" value="0.526649872"/>
+    <xacro:property name="thigh_com_x" value="-0.0026805"/>
+    <xacro:property name="thigh_com_y" value="-0.0146468"/>
+    <xacro:property name="thigh_com_z" value="-0.0227423"/>
+    <xacro:property name="thigh_ixx" value="0.0017520"/>
+    <xacro:property name="thigh_ixy" value="-0.0000007233"/>
+    <xacro:property name="thigh_ixz" value="0.0001157"/>
+    <xacro:property name="thigh_iyy" value="0.0016682"/>
+    <xacro:property name="thigh_iyz" value="-0.0000094"/>
+    <xacro:property name="thigh_izz" value="0.0003704"/>
+
+    <!-- calf - scale factor 0.29244 (mass 0.51989 * length^2 0.5625) -->
+    <xacro:property name="calf_mass" value="0.078504403"/>
+    <xacro:property name="calf_com_x" value="0.0053288"/>
+    <xacro:property name="calf_com_y" value="-0.0001793"/>
+    <xacro:property name="calf_com_z" value="-0.0727"/>
+    <xacro:property name="calf_ixx" value="0.0006858"/>
+    <xacro:property name="calf_ixy" value="0.0"/>
+    <xacro:property name="calf_ixz" value="-0.0000413"/>
+    <xacro:property name="calf_iyy" value="0.0006903"/>
+    <xacro:property name="calf_iyz" value="0.0"/>
+    <xacro:property name="calf_izz" value="0.0000091"/>
+
+    <!-- foot -->
+    <xacro:property name="foot_mass" value="0.06"/>
+
+</robot>

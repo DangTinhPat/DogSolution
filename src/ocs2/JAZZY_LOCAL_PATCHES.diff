@@ -1,0 +1,121 @@
+# Local patches applied on top of the vendored sources (see VENDORING.md).
+# Regenerate the 'before' side from the pinned commits listed there.
+
+## ocs2_robotic_assets: catkin -> ament_cmake
+# Reason: this repo (separate from leggedrobotics/ocs2) has no ros2/ament
+# branch upstream; its CMakeLists.txt/package.xml still target catkin.
+# The package only installs headers + a resources/ dir, so the port is
+# mechanical (catkin_package -> ament_cmake find_package + ament_package,
+# CATKIN_PACKAGE_*_DESTINATION -> plain include/<pkg> and share/<pkg>).
+
+--- /tmp/claude-1000/-home-dvt-babyDog/70eb5b3c-8441-4bd5-b4b5-c0e35c2a3edc/scratchpad/ocs2-assets-vendor/CMakeLists.txt	2026-08-24 22:28:28.538567309 +0700
++++ src/ocs2_robotic_assets/CMakeLists.txt	2026-08-24 22:45:05.644662582 +0700
+@@ -1,23 +1,14 @@
+-cmake_minimum_required(VERSION 3.0.2)
++cmake_minimum_required(VERSION 3.5)
+ project(ocs2_robotic_assets)
+ 
+-find_package(catkin)
+-
+-###################################
+-## catkin specific configuration ##
+-###################################
+-
+-catkin_package(
+-  INCLUDE_DIRS
+-    include
+-)
++find_package(ament_cmake REQUIRED)
+ 
+ ###########
+ ## Build ##
+ ###########
+ 
+ # Resolve for the package path at compile time.
+-configure_file (
++configure_file(
+   "${PROJECT_SOURCE_DIR}/include/${PROJECT_NAME}/package_path.h.in"
+   "${PROJECT_SOURCE_DIR}/include/${PROJECT_NAME}/package_path.h" @ONLY
+ )
+@@ -27,9 +18,12 @@
+ #############
+ 
+ install(DIRECTORY include/${PROJECT_NAME}/
+-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
++  DESTINATION include/${PROJECT_NAME}
+ )
+ 
+ install(DIRECTORY resources
+-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+-)
+\ No newline at end of file
++  DESTINATION share/${PROJECT_NAME}
++)
++
++ament_export_include_directories(include)
++ament_package()
+--- /tmp/claude-1000/-home-dvt-babyDog/70eb5b3c-8441-4bd5-b4b5-c0e35c2a3edc/scratchpad/ocs2-assets-vendor/package.xml	2026-08-24 22:28:28.538567309 +0700
++++ src/ocs2_robotic_assets/package.xml	2026-08-24 22:45:12.787740576 +0700
+@@ -1,14 +1,18 @@
+ <?xml version="1.0"?>
+-<package format="2">
++<package format="3">
+ 
+   <name>ocs2_robotic_assets</name>
+   <version>10.3.0</version>
+   <description>This package contains all the URDF files need for the robotic examples.</description>
+-  
++
+   <maintainer email="farbod.farshidian@gmail.com">Farbod Farshidian</maintainer>
+ 
+   <license>BSD-3</license>
+ 
+-  <buildtool_depend>catkin</buildtool_depend>
++  <buildtool_depend>ament_cmake</buildtool_depend>
++
++  <export>
++    <build_type>ament_cmake</build_type>
++  </export>
+ 
+ </package>
+
+## ocs2_legged_robot: ModelSettings can load jointNames/contactNames3DoF/contactNames6DoF from the task file
+# Reason: LeggedRobotInterface's constructor only takes (taskFile, urdfFile,
+# referenceFile) and builds the whole OptimalControlProblem internally from
+# ModelSettings loaded via loadModelSettings(taskFile, "model_settings").
+# That loader only read scalar fields; jointNames/contactNames3DoF stayed
+# hardcoded to ANYmal's names (LF_HAA... / LF_FOOT...) with no way to
+# override them short of forking the struct. babyDog needs its own joint
+# and foot-frame names. Purely additive: loadStdVector leaves the struct's
+# ANYmal defaults untouched if the fields are absent from task.info, so
+# existing ANYmal/qm_control-style task files are unaffected.
+
+--- /tmp/ModelSettings.h.orig	2026-08-24 22:52:16.337909130 +0700
++++ src/ocs2/ocs2_robotic_examples/ocs2_legged_robot/include/ocs2_legged_robot/common/ModelSettings.h	2026-08-24 22:52:24.234013128 +0700
+@@ -48,6 +48,10 @@
+   std::string modelFolderCppAd = "/tmp/ocs2";
+ 
+   // This is only used to get names for the knees and to check urdf for extra joints that need to be fixed.
++  // Overridable from the task file's model_settings block (jointNames /
++  // contactNames3DoF / contactNames6DoF) so non-ANYmal robots (e.g. babyDog)
++  // don't need to fork this struct's defaults. See babyDog's
++  // src/ocs2/JAZZY_LOCAL_PATCHES.diff for why this was added.
+   std::vector<std::string> jointNames{"LF_HAA", "LF_HFE", "LF_KFE", "RF_HAA", "RF_HFE", "RF_KFE",
+                                       "LH_HAA", "LH_HFE", "LH_KFE", "RH_HAA", "RH_HFE", "RH_KFE"};
+   std::vector<std::string> contactNames6DoF{};
+--- /tmp/ModelSettings.cpp.orig	2026-08-24 22:52:16.339909157 +0700
++++ src/ocs2/ocs2_robotic_examples/ocs2_legged_robot/src/common/ModelSettings.cpp	2026-08-24 22:52:33.434134561 +0700
+@@ -55,6 +55,13 @@
+   loadData::loadPtreeValue(pt, modelSettings.recompileLibrariesCppAd, fieldName + ".recompileLibrariesCppAd", verbose);
+   loadData::loadPtreeValue(pt, modelSettings.modelFolderCppAd, fieldName + ".modelFolderCppAd", verbose);
+ 
++  // Optional: override the compiled-in ANYmal joint/contact names for robots
++  // with a different naming convention. Falls back to the struct defaults
++  // above if the field is absent (loadStdVector leaves loadVector untouched).
++  loadData::loadStdVector(filename, fieldName + ".jointNames", modelSettings.jointNames, verbose);
++  loadData::loadStdVector(filename, fieldName + ".contactNames3DoF", modelSettings.contactNames3DoF, verbose);
++  loadData::loadStdVector(filename, fieldName + ".contactNames6DoF", modelSettings.contactNames6DoF, verbose);
++
+   if (verbose) {
+     std::cerr << " #### =============================================================================" << std::endl;
+   }

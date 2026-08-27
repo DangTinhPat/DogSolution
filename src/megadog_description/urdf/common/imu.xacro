@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="imu">
+    <xacro:macro name="IMU" params="connected_to imu_name xyz:='0 0 0' rpy:='0 0 0' ">
+        <!-- Imu is fixed to the base link -->
+        <joint name="${imu_name}_joint" type="fixed">
+            <origin xyz="${xyz}" rpy="${rpy}"/>
+            <parent link="${connected_to}"/>
+            <child link="${imu_name}"/>
+        </joint>
+        <!-- Imu link -->
+        <link name="${imu_name}">
+            <inertial>
+                <mass value="0.01"/>
+                <origin rpy="0 0 0" xyz="0 0 0"/>
+                <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+            </inertial>
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0"/>
+                <geometry>
+                    <box size="0.015 0.015 0.004"/>
+                </geometry>
+            </visual>
+            <material name="orange">
+                <color rgba="255 108 10 255"/>
+            </material>
+        </link>
+        <gazebo reference="${imu_name}">
+            <material>Gazebo/Orange</material>
+            <!-- Native Gazebo Harmonic IMU sensor + ros_gz_bridge, matching
+                 babyDog's main_bot/description/sensors/imu.xacro pattern.
+                 legged_control's original ROS1 stack had no URDF <sensor> tag
+                 at all here - LeggedHWSim computed IMU data manually from the
+                 link's world pose inside the classic gazebo_ros_control
+                 plugin; that bridging is unneeded with gz_ros2_control. -->
+            <sensor name="imu_sensor" type="imu">
+                <always_on>true</always_on>
+                <update_rate>100</update_rate>
+                <visualize>false</visualize>
+                <topic>/imu/sim_raw</topic>
+                <pose>0 0 0 0 0 0</pose>
+            </sensor>
+        </gazebo>
+        <gazebo reference="${imu_name}_joint">
+            <disableFixedJointLumping>true</disableFixedJointLumping>
+        </gazebo>
+    </xacro:macro>
+</robot>

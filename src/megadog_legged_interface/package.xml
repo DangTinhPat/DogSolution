@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>megadog_legged_interface</name>
+  <version>0.0.1</version>
+  <description>
+    Stands up stock ocs2::legged_robot::LeggedRobotInterface against A1's own
+    URDF/task/reference files (Milestone 2 of the megaDog port). Modeled on
+    babyDog's babydog_legged_interface.
+  </description>
+  <maintainer email="dvt@example.com">dvt</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ocs2_core</depend>
+  <depend>ocs2_oc</depend>
+  <depend>ocs2_mpc</depend>
+  <depend>ocs2_sqp</depend>
+  <depend>ocs2_ddp</depend>
+  <depend>ocs2_ipm</depend>
+  <depend>ocs2_robotic_tools</depend>
+  <depend>ocs2_pinocchio_interface</depend>
+  <depend>ocs2_centroidal_model</depend>
+  <depend>ocs2_legged_robot</depend>
+  <depend>pinocchio</depend>
+  <depend>boost</depend>
+
+  <!-- Build-time only: generates a plain URDF from megadog_description's
+       urdf/robot.xacro (source-tree relative path, not the ament index) -
+       see CMakeLists.txt. Deliberately not a package.xml depend, same
+       reasoning as babydog_legged_interface's comment (avoids a colcon
+       dependency cycle once a controller package depends on both). -->
+  <exec_depend>xacro</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
