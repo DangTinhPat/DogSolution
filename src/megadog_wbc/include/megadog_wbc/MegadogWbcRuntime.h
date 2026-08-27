@@ -60,6 +60,7 @@ struct MegadogWbcCommand
     double base_y_reference_m = std::numeric_limits<double>::quiet_NaN();
     double base_yaw_reference_rad = std::numeric_limits<double>::quiet_NaN();
     double com_height_m = 0.3;
+    bool use_mpc_for_stance_hold = false;
 };
 
 // Measured feedback this runtime needs each control tick. Milestone 3 of the

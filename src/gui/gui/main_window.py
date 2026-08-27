@@ -65,6 +65,7 @@ class SimControlGui:
         self.procs = {'sim': None, 'rviz': None}
         self.proc_widgets = {}
         self.fsm_widgets = []
+        self.force_widgets = []
         self.log_queue = queue.Queue()
 
         self._build_widgets()
@@ -96,6 +97,13 @@ class SimControlGui:
         style.configure('TEntry', fieldbackground=BG_ENTRY, foreground=FG,
                          insertcolor=FG, bordercolor=BORDER,
                          lightcolor=BG_ENTRY, darkcolor=BG_ENTRY, padding=5)
+        style.configure('TCombobox', fieldbackground=BG_ENTRY, foreground=FG,
+                         background=BG_ENTRY, arrowcolor=FG, bordercolor=BORDER,
+                         lightcolor=BG_ENTRY, darkcolor=BG_ENTRY, padding=5)
+        style.configure('TSpinbox', fieldbackground=BG_ENTRY, foreground=FG,
+                         insertcolor=FG, bordercolor=BORDER,
+                         lightcolor=BG_ENTRY, darkcolor=BG_ENTRY, arrowsize=13,
+                         padding=5)
 
         style.configure('TButton', background=BG_PANEL, foreground=FG,
                          font=('TkDefaultFont', 10), padding=(14, 8), borderwidth=0,
@@ -177,6 +185,7 @@ class SimControlGui:
         ).pack(side='left')
 
         self._build_fsm_panel()
+        self._build_force_panel()
 
         util_row = ttk.Frame(self.root, padding=(16, 4))
         util_row.pack(fill='x')
@@ -250,10 +259,61 @@ class SimControlGui:
             self.fsm_widgets.append(button)
         self._set_fsm_controls_enabled(False)
 
+    def _build_force_panel(self):
+        force_frame = ttk.LabelFrame(
+            self.root, text='FORCE TEST (needs Sim running)', padding=(14, 10))
+        force_frame.pack(fill='x', padx=16, pady=(0, 6))
+
+        force_row = ttk.Frame(force_frame)
+        force_row.pack(fill='x')
+
+        self.force_direction_var = tk.StringVar(value='+X forward')
+        self.force_newton_var = tk.DoubleVar(value=5.0)
+        self.force_newton_label_var = tk.StringVar(value='5 N')
+        self.force_duration_ms_var = tk.StringVar(value='200')
+
+        ttk.Label(force_row, text='Direction').pack(side='left')
+        direction_box = ttk.Combobox(
+            force_row, textvariable=self.force_direction_var, width=12,
+            values=('+X forward', '-X backward', '+Y left', '-Y right', '+Z up'),
+            state='readonly')
+        direction_box.pack(side='left', padx=(6, 14))
+
+        ttk.Label(force_row, text='Force').pack(side='left')
+        force_slider = ttk.Scale(
+            force_row, from_=1, to=30, orient='horizontal',
+            variable=self.force_newton_var, command=self._on_force_slider_changed)
+        force_slider.pack(side='left', fill='x', expand=True, padx=(6, 8))
+        force_value_label = ttk.Label(force_row, textvariable=self.force_newton_label_var, width=7)
+        force_value_label.pack(side='left', padx=(0, 14))
+
+        ttk.Label(force_row, text='Duration ms').pack(side='left')
+        duration_spin = ttk.Spinbox(
+            force_row, from_=50, to=1000, increment=50, width=7,
+            textvariable=self.force_duration_ms_var)
+        duration_spin.pack(side='left', padx=(6, 14))
+
+        push_button = ttk.Button(force_row, text='Apply push', command=self.apply_force)
+        push_button.pack(side='left')
+
+        self.force_widgets.extend([
+            direction_box, force_slider, force_value_label, duration_spin, push_button])
+        self._set_force_controls_enabled(False)
+
     def _set_fsm_controls_enabled(self, enabled):
         state = 'normal' if enabled else 'disabled'
         for widget in self.fsm_widgets:
             widget.configure(state=state)
+
+    def _set_force_controls_enabled(self, enabled):
+        for widget in self.force_widgets:
+            if isinstance(widget, ttk.Combobox):
+                widget.configure(state='readonly' if enabled else 'disabled')
+            else:
+                widget.configure(state='normal' if enabled else 'disabled')
+
+    def _on_force_slider_changed(self, value):
+        self.force_newton_label_var.set(f'{float(value):.0f} N')
 
     def _publish_cmd(self, value):
         self._append_log(f"$ ros2 topic pub --once /megadog/cmd std_msgs/msg/String \"{{data: {value}}}\"\n")
@@ -267,6 +327,86 @@ class SimControlGui:
             self.log_queue.put(('log', None, result.stdout))
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.log_queue.put(('log', None, f'Failed to publish cmd: {exc}\n'))
+
+    def apply_force(self):
+        try:
+            force_n = float(self.force_newton_var.get())
+            duration_ms = int(float(self.force_duration_ms_var.get()))
+        except ValueError:
+            self._append_log('Force test ignored: force and duration must be numbers.\n')
+            return
+        force_n = max(0.0, min(force_n, 30.0))
+        duration_ms = max(1, min(duration_ms, 5000))
+        self.force_newton_var.set(force_n)
+        self.force_newton_label_var.set(f'{force_n:.0f} N')
+        self.force_duration_ms_var.set(str(duration_ms))
+
+        direction = self.force_direction_var.get()
+        axis_forces = {
+            '+X forward': (force_n, 0.0, 0.0),
+            '-X backward': (-force_n, 0.0, 0.0),
+            '+Y left': (0.0, force_n, 0.0),
+            '-Y right': (0.0, -force_n, 0.0),
+            '+Z up': (0.0, 0.0, force_n),
+        }
+        force_xyz = axis_forces.get(direction, (force_n, 0.0, 0.0))
+        robot_name = self.robot_name_var.get().strip() or 'a1'
+        threading.Thread(
+            target=self._run_apply_force,
+            args=(robot_name, force_xyz, duration_ms),
+            daemon=True).start()
+
+    def _run_apply_force(self, robot_name, force_xyz, duration_ms):
+        force_x, force_y, force_z = force_xyz
+        # Gazebo's ApplyLinkWrench resolves the spawned URDF link by its link
+        # entity name in this world; /pose/info shows it as "base".
+        target_link = 'base'
+        request = (
+            f'entity: {{name: "{target_link}", type: LINK}} '
+            f'wrench: {{force: {{x: {force_x:g}, y: {force_y:g}, z: {force_z:g}}}}}'
+        )
+        apply_cmd = [
+            'gz', 'topic', '-t', '/world/megadog_world/wrench/persistent',
+            '-m', 'gz.msgs.EntityWrench',
+            '-p', request,
+        ]
+        clear_cmd = [
+            'gz', 'topic', '-t', '/world/megadog_world/wrench/clear',
+            '-m', 'gz.msgs.Entity',
+            '-p', f'name: "{target_link}", type: LINK',
+        ]
+        self.log_queue.put((
+            'log', None,
+            f'Applying {force_x:g} {force_y:g} {force_z:g} N to {target_link} '
+            f'for {duration_ms} ms\n'
+        ))
+        self.log_queue.put(('log', None, '$ ' + ' '.join(apply_cmd) + '\n'))
+        try:
+            result = subprocess.run(
+                apply_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=2)
+            if result.stdout:
+                self.log_queue.put(('log', None, result.stdout))
+            if result.returncode != 0:
+                self.log_queue.put(('log', None, f'Force publish failed with code {result.returncode}\n'))
+                return
+            time.sleep(duration_ms / 1000.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.log_queue.put(('log', None, f'Failed to apply force: {exc}\n'))
+        finally:
+            self.log_queue.put(('log', None, '$ ' + ' '.join(clear_cmd) + '\n'))
+            try:
+                result = subprocess.run(
+                    clear_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, timeout=2)
+                if result.stdout:
+                    self.log_queue.put(('log', None, result.stdout))
+                if result.returncode == 0:
+                    self.log_queue.put(('log', None, 'Force cleared.\n'))
+                else:
+                    self.log_queue.put(('log', None, f'Force clear failed with code {result.returncode}\n'))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                self.log_queue.put(('log', None, f'Failed to clear force: {exc}\n'))
 
     def _block_edit(self, event):
         ctrl_held = bool(event.state & 0x4)
@@ -326,6 +466,7 @@ class SimControlGui:
         self._set_badge(widgets['status'], f'Running (pid {proc.pid})', 'running')
         if key == 'sim':
             self._set_fsm_controls_enabled(True)
+            self._set_force_controls_enabled(True)
 
         threading.Thread(target=self._read_proc_output, args=(key, proc), daemon=True).start()
 
@@ -350,6 +491,7 @@ class SimControlGui:
                     self._set_badge(widgets['status'], 'Idle', 'idle')
                     if key == 'sim':
                         self._set_fsm_controls_enabled(False)
+                        self._set_force_controls_enabled(False)
                 elif kind == 'kill_done':
                     self.kill_button.configure(state='normal')
         except queue.Empty:

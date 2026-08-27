@@ -304,7 +304,14 @@ void MegadogWbcRuntime::setTargetTrajectories(const double time_s, const vector_
     startState.head<3>() = commandVelocityWorld;
     finalState.head<3>() = commandVelocityWorld;
 
-    const vector_t desiredInput = vector_t::Zero(info.inputDim);
+    vector_t desiredInput = vector_t::Zero(info.inputDim);
+    const bool stanceHoldTarget =
+        command.gait_name == "stance" && std::abs(command.base_velocity_x_m_s) < 1e-6 &&
+        std::abs(command.base_velocity_y_m_s) < 1e-6 && std::abs(command.base_yaw_rate_rad_s) < 1e-6;
+    if (stanceHoldTarget) {
+        const contact_flag_t allStance{true, true, true, true};
+        desiredInput = weightCompensatingInput(info, allStance);
+    }
     const TargetTrajectories targetTrajectories({time_s, time_s + timeToTarget}, {startState, finalState},
                                                 {desiredInput, desiredInput});
     interface_->getReferenceManagerPtr()->setTargetTrajectories(targetTrajectories);
@@ -341,7 +348,7 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
     const bool stanceHoldCommand =
         command.gait_name == "stance" && std::abs(command.base_velocity_x_m_s) < 1e-6 &&
         std::abs(command.base_velocity_y_m_s) < 1e-6 && std::abs(command.base_yaw_rate_rad_s) < 1e-6;
-    if (stanceHoldCommand) {
+    if (stanceHoldCommand && !command.use_mpc_for_stance_hold) {
         mpc_worker_enabled_.store(false, std::memory_order_relaxed);
 
         optimizedState = vector_t::Zero(info.stateDim);

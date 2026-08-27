@@ -151,6 +151,10 @@ const char* fsmStateName(const MegadogFsmState state)
             return "HOME";
         case MegadogFsmState::STAND:
             return "STAND";
+        case MegadogFsmState::STAND_NMPC:
+            return "STAND_NMPC";
+        case MegadogFsmState::STAND_WBC:
+            return "STAND_WBC";
         case MegadogFsmState::TROT_IN_PLACE:
             return "TROT_IN_PLACE";
         case MegadogFsmState::FORWARD:
@@ -163,8 +167,9 @@ const char* fsmStateName(const MegadogFsmState state)
 
 bool isWbcState(const MegadogFsmState state)
 {
-    return state == MegadogFsmState::STAND || state == MegadogFsmState::TROT_IN_PLACE ||
-           state == MegadogFsmState::FORWARD || state == MegadogFsmState::BACKWARD;
+    return state == MegadogFsmState::STAND || state == MegadogFsmState::STAND_NMPC ||
+           state == MegadogFsmState::STAND_WBC || state == MegadogFsmState::TROT_IN_PLACE || state == MegadogFsmState::FORWARD ||
+           state == MegadogFsmState::BACKWARD;
 }
 
 bool isLocomotionState(const MegadogFsmState state)
@@ -292,6 +297,10 @@ controller_interface::CallbackReturn MegadogController::on_configure(const rclcp
                 next = MegadogFsmState::HOME;
             } else if (msg->data == "stand") {
                 next = MegadogFsmState::STAND;
+            } else if (msg->data == "stand_nmpc") {
+                next = MegadogFsmState::STAND_NMPC;
+            } else if (msg->data == "stand_wbc") {
+                next = MegadogFsmState::STAND_WBC;
             } else if (msg->data == "trot_in_place") {
                 next = MegadogFsmState::TROT_IN_PLACE;
             } else if (msg->data == "forward" || msg->data == "trot" || msg->data == "trot_forward") {
@@ -299,8 +308,8 @@ controller_interface::CallbackReturn MegadogController::on_configure(const rclcp
             } else if (msg->data == "backward") {
                 next = MegadogFsmState::BACKWARD;
             } else {
-                RCLCPP_WARN(get_node()->get_logger(), "Unknown /megadog/cmd '%s' (expected home|stand|trot_in_place|forward|trot|trot_forward|backward)",
-                            msg->data.c_str());
+                RCLCPP_WARN(get_node()->get_logger(), "Unknown /megadog/cmd '%s' (expected home|stand|stand_nmpc|stand_wbc|trot_in_place|forward|trot|trot_forward|backward)",
+                             msg->data.c_str());
                 return;
             }
             // HOME's settled prone pose is the requested init pose, so normal
@@ -313,17 +322,11 @@ controller_interface::CallbackReturn MegadogController::on_configure(const rclcp
 
 controller_interface::CallbackReturn MegadogController::on_activate(const rclcpp_lifecycle::State&)
 {
-    // visualize_enabled=true: sim-only debug tooling, publishes OCS2's own
-    // RViz Marker/MarkerArray trajectory visualization (see
-    // MegadogWbcRuntime::publishVisualization) - megadog.rviz's "OCS2 ..."
-    // displays are wired to these topics. Left on unconditionally (matches
-    // rz_sim.launch.py's model: RViz can be opened/closed independently of
-    // sim.launch.py at any time and just reflects whatever's already on the
-    // ROS graph, so the publisher side can't be gated by an rviz:= launch
-    // flag) - the extra publish work is throttled internally to 20 Hz max
-    // (see MegadogWbcRuntime's maxUpdateFrequency) and is cheap relative to
-    // the control loop even when nothing is subscribed.
-    runtime_ = std::make_unique<megadog::hwbc::MegadogWbcRuntime>(makeDevqWbcConfig(), true);
+    // OCS2/WBC runtime is created lazily on the first non-HOME command. This
+    // keeps opening the simulator in the passive HOME pose from touching CppAD/
+    // MPC at all, which avoids startup aborts before the user asks the robot to
+    // stand or walk.
+    runtime_.reset();
     start_time_s_ = -1.0;
     elapsed_s_ = 0.0;
     wbc_time_s_ = 0.0;
@@ -345,10 +348,6 @@ controller_interface::CallbackReturn MegadogController::on_activate(const rclcpp
     state_entered_wbc_time_s_ = 0.0;
     locomotion_runtime_epoch_wbc_time_s_ = 0.0;
     smoothed_velocity_x_m_s_ = 0.0;
-    if (!runtime_->ready()) {
-        RCLCPP_ERROR(get_node()->get_logger(), "MegadogWbcRuntime failed to initialize");
-        return controller_interface::CallbackReturn::ERROR;
-    }
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -361,7 +360,7 @@ controller_interface::CallbackReturn MegadogController::on_deactivate(const rclc
 controller_interface::return_type MegadogController::update(const rclcpp::Time& time, const rclcpp::Duration& period)
 {
     const double dt = period.seconds();
-    if (!runtime_ || !runtime_->ready() || !std::isfinite(dt) || dt <= 0.0) {
+    if (!std::isfinite(dt) || dt <= 0.0) {
         for (auto& command_interface : command_interfaces_) {
             std::ignore = command_interface.set_value(0.0);
         }
@@ -531,8 +530,11 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         command.com_height_m = kComHeightM;
         switch (fsm_state) {
             case MegadogFsmState::STAND:
+            case MegadogFsmState::STAND_NMPC:
+            case MegadogFsmState::STAND_WBC:
                 command.gait_name = "stance";
-                if (base_reference_latched_) {
+                command.use_mpc_for_stance_hold = fsm_state == MegadogFsmState::STAND_NMPC;
+                if (fsm_state != MegadogFsmState::STAND_NMPC && base_reference_latched_) {
                     command.base_x_reference_m = latched_base_position_reference_m_[0];
                     command.base_y_reference_m = latched_base_position_reference_m_[1];
                     command.base_yaw_reference_rad = latched_base_yaw_reference_rad_;
@@ -557,9 +559,20 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         }
 
         const double runtime_epoch_s =
-            fsm_state == MegadogFsmState::STAND && standup_start_latched_ ? kStandupDurationS : locomotion_runtime_epoch_wbc_time_s_;
+            (fsm_state == MegadogFsmState::STAND || fsm_state == MegadogFsmState::STAND_NMPC ||
+             fsm_state == MegadogFsmState::STAND_WBC) &&
+                    standup_start_latched_
+                ? kStandupDurationS
+                : locomotion_runtime_epoch_wbc_time_s_;
         const double runtime_time_s = std::max(0.0, wbc_time_s_ - runtime_epoch_s);
-        ok = runtime_->update(runtime_time_s, dt, time, measurement, command, result);
+        if (!runtime_) {
+            runtime_ = std::make_unique<megadog::hwbc::MegadogWbcRuntime>(makeDevqWbcConfig(), true);
+            if (!runtime_->ready()) {
+                RCLCPP_ERROR(get_node()->get_logger(), "MegadogWbcRuntime failed to initialize");
+                runtime_.reset();
+            }
+        }
+        ok = runtime_ && runtime_->ready() && runtime_->update(runtime_time_s, dt, time, measurement, command, result);
         if (ok && result.valid) {
             for (std::size_t j = 0; j < jointNames().size(); ++j) {
                 double posture_torque = 0.0;

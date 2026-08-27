@@ -48,6 +48,8 @@ enum class MegadogFsmState
 {
     HOME,
     STAND,
+    STAND_NMPC,
+    STAND_WBC,
     TROT_IN_PLACE,
     FORWARD,
     BACKWARD,
