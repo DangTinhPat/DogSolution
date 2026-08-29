@@ -14,7 +14,6 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
-find_package(tf2_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -28,7 +27,6 @@ set(MEGADOG_CONTROLLER_DEPENDS
   pluginlib
   rclcpp
   rclcpp_lifecycle
-  tf2_msgs
   tf2_ros
   geometry_msgs
   sensor_msgs

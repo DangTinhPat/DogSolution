@@ -12,6 +12,7 @@
 // own Marker/MarkerArray desired/optimized trajectory via
 // ocs2_legged_robot_ros::LeggedRobotVisualizer, called directly in-process.
 
+#include "megadog_wbc/BaseStateEstimator.h"
 #include "megadog_wbc/HierarchicalWbc.h"
 
 #include <ocs2_centroidal_model/CentroidalModelRbdConversions.h>
@@ -63,11 +64,18 @@ struct MegadogWbcCommand
     bool use_mpc_for_stance_hold = false;
 };
 
-// Measured feedback this runtime needs each control tick. Milestone 3 of the
-// megaDog port uses Gazebo's own ground-truth model pose for base_pos_m/
-// base_euler_zyx_rad/base_linear_vel_m_s/base_euler_zyx_rate_rad_s (matching
-// babyDog's own sim-only StateTrot::fillMeasurement() shortcut) rather than
-// a real state estimator (legged_estimation's KalmanFilterEstimate, deferred).
+// Measured feedback this runtime needs each control tick. base_euler_zyx_rad/
+// base_euler_zyx_rate_rad_s/base_linear_accel_local_m_s2 come from /imu/data
+// (same in sim and on real hardware, see MegadogController's
+// state-estimation comment). base_pos_m/base_linear_vel_m_s are the
+// CALLER's best guess (MegadogController currently pins them at a fixed
+// local origin with zero velocity) - MegadogWbcRuntime::update() does not
+// use them directly; it overwrites both with BaseStateEstimator's own
+// leg-odometry estimate (IMU + joint encoders + gait-schedule contact,
+// see BaseStateEstimator.h) before building the RBD state the base_height/
+// base_linear Cartesian tasks in WbcBase.cpp see. They stay in this struct
+// so a caller with a real absolute-position source (none exists yet) has
+// somewhere to put one.
 struct MegadogWbcMeasurement
 {
     std::array<double, 12> joint_pos_rad{};
@@ -76,6 +84,7 @@ struct MegadogWbcMeasurement
     std::array<double, 3> base_euler_zyx_rad{};
     std::array<double, 3> base_linear_vel_m_s{};
     std::array<double, 3> base_euler_zyx_rate_rad_s{};
+    std::array<double, 3> base_linear_accel_local_m_s2{};
 };
 
 class MegadogWbcRuntime
@@ -125,6 +134,7 @@ private:
     std::unique_ptr<ocs2::MPC_MRT_Interface> mrt_;
     std::unique_ptr<ocs2::CentroidalModelRbdConversions> rbd_conversions_;
     std::unique_ptr<HierarchicalWbc> wbc_;
+    std::unique_ptr<BaseStateEstimator> base_state_estimator_;
 
     std::thread mpc_thread_;
     std::atomic<bool> thread_running_{false};

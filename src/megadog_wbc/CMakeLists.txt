@@ -72,6 +72,7 @@ add_library(${PROJECT_NAME} STATIC
   src/HoQp.cpp
   src/WbcBase.cpp
   src/HierarchicalWbc.cpp
+  src/BaseStateEstimator.cpp
   src/MegadogWbcRuntime.cpp
 )
 set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)

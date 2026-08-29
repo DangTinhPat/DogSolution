@@ -196,6 +196,12 @@ MegadogWbcRuntime::MegadogWbcRuntime(HierarchicalWbcConfig wbc_config, bool visu
         }
 
         const vector_t initState = interface_->getInitialState();
+        // initState.segment(6,6) is [x,y,z, zyx] (see setTargetTrajectories()'s
+        // own baseCurrentPose slicing below) - index 8 is the nominal standing
+        // height, a reasonable seed for the estimator's position state.
+        base_state_estimator_ = std::make_unique<BaseStateEstimator>(
+            interface_->getPinocchioInterface(), interface_->getCentroidalModelInfo(), eeKinematics, initState(8));
+
         const contact_flag_t allStance{true, true, true, true};
         const vector_t desiredInput = weightCompensatingInput(interface_->getCentroidalModelInfo(), allStance);
         const scalar_t horizon = interface_->mpcSettings().timeHorizon_;
@@ -355,7 +361,41 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
     }
 
     const auto& info = interface_->getCentroidalModelInfo();
-    const vector_t rbdState = buildRbdState(measurement, info.generalizedCoordinatesNum, info.actuatedDofNum);
+
+    const bool stanceHoldCommand =
+        command.gait_name == "stance" && std::abs(command.base_velocity_x_m_s) < 1e-6 &&
+        std::abs(command.base_velocity_y_m_s) < 1e-6 && std::abs(command.base_yaw_rate_rad_s) < 1e-6;
+
+    // Contact flags come from the gait schedule's own stance/swing prediction
+    // at this tick's time, available before MPC ever runs (there is no real
+    // contact sensor, in sim or otherwise - see BaseStateEstimator.h) -
+    // needed now, ahead of buildRbdState(), so the estimator can fill in
+    // base_pos_m/base_linear_vel_m_s before the RBD state is built from them.
+    contact_flag_t estimatorContactFlag{true, true, true, true};
+    if (!(stanceHoldCommand && !command.use_mpc_for_stance_hold)) {
+        if (!setGaitTemplateIfNeeded(command.gait_name, time_s)) {
+            return false;
+        }
+        const auto& activeModeSchedule = interface_->getReferenceManagerPtr()->getModeSchedule();
+        estimatorContactFlag = modeNumber2StanceLeg(safeModeAtTimeOrStance(activeModeSchedule, time_s));
+    }
+
+    MegadogWbcMeasurement estimatedMeasurement = measurement;
+    if (base_state_estimator_) {
+        BaseStateEstimator::Input estimatorInput;
+        estimatorInput.base_euler_zyx_rad = measurement.base_euler_zyx_rad;
+        estimatorInput.base_euler_zyx_rate_rad_s = measurement.base_euler_zyx_rate_rad_s;
+        estimatorInput.base_linear_accel_local_m_s2 = measurement.base_linear_accel_local_m_s2;
+        estimatorInput.joint_pos_rad = measurement.joint_pos_rad;
+        estimatorInput.joint_vel_rad_s = measurement.joint_vel_rad_s;
+        estimatorInput.contact_flag = estimatorContactFlag;
+        estimatorInput.dt_s = dt_s;
+        const auto estimatorOutput = base_state_estimator_->update(estimatorInput);
+        estimatedMeasurement.base_pos_m = estimatorOutput.base_pos_m;
+        estimatedMeasurement.base_linear_vel_m_s = estimatorOutput.base_linear_vel_m_s;
+    }
+
+    const vector_t rbdState = buildRbdState(estimatedMeasurement, info.generalizedCoordinatesNum, info.actuatedDofNum);
     if (!isFiniteVector(rbdState)) {
         std::cerr << "[MegadogWbcRuntime] measured RBD state is not finite" << std::endl;
         return false;
@@ -374,9 +414,6 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
     vector_t optimizedState;
     vector_t optimizedInput;
     size_t plannedMode = 0;
-    const bool stanceHoldCommand =
-        command.gait_name == "stance" && std::abs(command.base_velocity_x_m_s) < 1e-6 &&
-        std::abs(command.base_velocity_y_m_s) < 1e-6 && std::abs(command.base_yaw_rate_rad_s) < 1e-6;
     if (stanceHoldCommand && !command.use_mpc_for_stance_hold) {
         mpc_worker_enabled_.store(false, std::memory_order_relaxed);
 
@@ -403,9 +440,8 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
         plannedMode = ModeNumber::STANCE;
     } else {
         mpc_worker_enabled_.store(true, std::memory_order_relaxed);
-        if (!setGaitTemplateIfNeeded(command.gait_name, time_s)) {
-            return false;
-        }
+        // Gait schedule already ensured up-to-date above (needed earlier for
+        // the contact-flag lookup feeding the state estimator).
         setTargetTrajectories(time_s, observation.state, command);
         const auto& activeModeSchedule = interface_->getReferenceManagerPtr()->getModeSchedule();
         observation.mode = safeModeAtTimeOrStance(activeModeSchedule, time_s);
@@ -504,7 +540,7 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
     result.valid = true;
 
     if (visualize_enabled_) {
-        publishVisualization(time_s, ros_time, measurement);
+        publishVisualization(time_s, ros_time, estimatedMeasurement);
 
         const contact_flag_t contactFlags = modeNumber2StanceLeg(plannedMode);
         std::vector<vector3_t> feetPositions(info.numThreeDofContacts);
