@@ -10,11 +10,13 @@
 // hybridJointHandles_[j].setCommand(pos,vel,kp=0,kd=3,ff) call) is computed
 // directly here: effort = torque_ff + kd * (velocity_desired - velocity_measured).
 //
-// State estimation: ground-truth base pose from Gazebo's own dynamic_pose/
-// info bridge (/sim/model_poses, tf2_msgs/TFMessage) - a real state
-// estimator (legged_estimation's KalmanFilterEstimate) is future work.
+// State estimation: sim uses Gazebo ground-truth model pose; real hardware
+// uses /imu/data for base roll/pitch/yaw and angular velocity, with base
+// position held at a finite local odom origin until a fuller leg odometry
+// estimator is added.
 
 #include <controller_interface/controller_interface.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -83,11 +85,24 @@ private:
         bool has_data = false;
     };
 
+    struct RealImuSample
+    {
+        std::array<double, 3> euler_zyx_rad{};
+        std::array<double, 3> euler_zyx_rate_rad_s{};
+        std::array<double, 4> orientation_wxyz{1.0, 0.0, 0.0, 0.0};
+        std::array<double, 3> angular_velocity_body_rad_s{};
+        std::array<double, 3> linear_acceleration_m_s2{};
+        std::chrono::steady_clock::time_point stamp{};
+        bool has_data = false;
+    };
+
     static const std::vector<std::string>& jointNames();
 
     std::unique_ptr<megadog::hwbc::MegadogWbcRuntime> runtime_;
     rclcpp::CallbackGroup::SharedPtr sim_base_callback_group_;
     rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sim_base_subscription_;
+    rclcpp::CallbackGroup::SharedPtr real_imu_callback_group_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr real_imu_subscription_;
     // Broadcasts "odom" -> "base" every control tick from the same
     // ground-truth pose sim_base_subscription_ already receives, so RViz can
     // set Fixed Frame to "odom" and see the robot actually walk through the
@@ -97,6 +112,7 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> odom_tf_broadcaster_;
     std::mutex sim_base_mutex_;
     SimBaseSample latest_sim_base_state_;
+    RealImuSample latest_real_imu_state_;
     SimBaseSample last_control_base_sample_;
     bool last_control_base_sample_valid_ = false;
     std::array<double, 3> filtered_base_linear_velocity_m_s_{};

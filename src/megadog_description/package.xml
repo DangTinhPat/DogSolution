@@ -21,6 +21,10 @@
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>megadog_controller</exec_depend>
+  <exec_depend>imu_kalman_filter</exec_depend>
+  <exec_depend>main_bot_hardware</exec_depend>
+  <exec_depend>main_bot_hardware_msgs</exec_depend>
+  <exec_depend>micro_ros_agent</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

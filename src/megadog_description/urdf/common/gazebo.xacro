@@ -19,31 +19,35 @@
         </joint>
     </xacro:macro>
 
-    <ros2_control name="GazeboSimSystem" type="system">
-        <hardware>
-            <plugin>gz_ros2_control/GazeboSimSystem</plugin>
-        </hardware>
-        <xacro:megadog_ros2_control_joint name="LF_HAA" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="LF_HFE" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="LF_KFE" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="LH_HAA" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="LH_HFE" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="LH_KFE" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="RF_HAA" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="RF_HFE" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="RF_KFE" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="RH_HAA" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="RH_HFE" initial_position="0.0"/>
-        <xacro:megadog_ros2_control_joint name="RH_KFE" initial_position="0.0"/>
-    </ros2_control>
+    <xacro:if value="$(arg sim)">
+        <ros2_control name="GazeboSimSystem" type="system">
+            <hardware>
+                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+            </hardware>
+            <xacro:megadog_ros2_control_joint name="LF_HAA" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="LF_HFE" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="LF_KFE" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="LH_HAA" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="LH_HFE" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="LH_KFE" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="RF_HAA" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="RF_HFE" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="RF_KFE" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="RH_HAA" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="RH_HFE" initial_position="0.0"/>
+            <xacro:megadog_ros2_control_joint name="RH_KFE" initial_position="0.0"/>
+        </ros2_control>
+    </xacro:if>
 
-    <gazebo>
-        <plugin filename="libgz_ros2_control-system.so"
-                name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-            <!-- megadog_share is declared by robot.xacro's including launch file
-                 via a top-level xacro:arg - see sim.launch.py. -->
-            <parameters>$(arg megadog_share)/config/controllers.yaml</parameters>
-        </plugin>
-    </gazebo>
+    <xacro:if value="$(arg sim)">
+        <gazebo>
+            <plugin filename="libgz_ros2_control-system.so"
+                    name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+                <!-- megadog_share is declared by robot.xacro's including launch file
+                     via a top-level xacro:arg - see sim.launch.py. -->
+                <parameters>$(arg megadog_share)/config/controllers.yaml</parameters>
+            </plugin>
+        </gazebo>
+    </xacro:if>
 
 </robot>

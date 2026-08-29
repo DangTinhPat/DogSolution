@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:macro name="megadog_real_ros2_control_joint" params="name">
+        <joint name="${name}">
+            <command_interface name="position"/>
+            <command_interface name="velocity"/>
+            <command_interface name="kp"/>
+            <command_interface name="kd"/>
+            <command_interface name="effort"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+            <state_interface name="effort"/>
+            <state_interface name="visual_position"/>
+            <state_interface name="visual_velocity"/>
+        </joint>
+    </xacro:macro>
+
+    <xacro:if value="$(arg real_hardware)">
+        <ros2_control name="MegaDogRealSystem" type="system">
+            <hardware>
+                <plugin>main_bot_hardware/RealSystem</plugin>
+            </hardware>
+            <xacro:megadog_real_ros2_control_joint name="LF_HAA"/>
+            <xacro:megadog_real_ros2_control_joint name="LF_HFE"/>
+            <xacro:megadog_real_ros2_control_joint name="LF_KFE"/>
+            <xacro:megadog_real_ros2_control_joint name="LH_HAA"/>
+            <xacro:megadog_real_ros2_control_joint name="LH_HFE"/>
+            <xacro:megadog_real_ros2_control_joint name="LH_KFE"/>
+            <xacro:megadog_real_ros2_control_joint name="RF_HAA"/>
+            <xacro:megadog_real_ros2_control_joint name="RF_HFE"/>
+            <xacro:megadog_real_ros2_control_joint name="RF_KFE"/>
+            <xacro:megadog_real_ros2_control_joint name="RH_HAA"/>
+            <xacro:megadog_real_ros2_control_joint name="RH_HFE"/>
+            <xacro:megadog_real_ros2_control_joint name="RH_KFE"/>
+        </ros2_control>
+    </xacro:if>
+
+</robot>

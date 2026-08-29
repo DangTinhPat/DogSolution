@@ -15,6 +15,7 @@
 #include <ocs2_legged_robot/gait/ModeSequenceTemplate.h>
 #include <ocs2_legged_robot/gait/MotionPhaseDefinition.h>
 #include <ocs2_pinocchio_interface/PinocchioEndEffectorKinematics.h>
+#include <ocs2_core/misc/LinearInterpolation.h>
 #include <ocs2_robotic_tools/common/AngularVelocityMapping.h>
 #include <ocs2_robotic_tools/common/RotationDerivativesTransforms.h>
 #include <ocs2_ros_interfaces/visualization/VisualizationHelpers.h>
@@ -97,13 +98,41 @@ size_t safeModeAtTimeOrStance(const ModeSchedule& schedule, const scalar_t time)
                   << ", falling back to STANCE" << std::endl;
         return stanceMode;
     }
-    try {
-        return schedule.modeAtTime(time);
-    } catch (const std::exception& e) {
-        std::cerr << "[MegadogWbcRuntime] modeAtTime(" << time << ") failed: " << e.what()
-                  << ", falling back to STANCE" << std::endl;
-        return stanceMode;
+    if (schedule.eventTimes.empty()) {
+        return schedule.modeSequence.front();
     }
+
+    if (time < schedule.eventTimes.front()) {
+        return schedule.modeSequence.front();
+    }
+    for (size_t i = 0; i < schedule.eventTimes.size(); ++i) {
+        if (time < schedule.eventTimes[i]) {
+            return schedule.modeSequence[i];
+        }
+    }
+    return schedule.modeSequence.back();
+}
+
+bool evaluatePolicyWithoutModeAtTime(MPC_MRT_Interface& mrt, const scalar_t requestedTime, const vector_t& currentState,
+                                     vector_t& mpcState, vector_t& mpcInput, size_t& mode)
+{
+    const auto& policy = mrt.getPolicy();
+    if (!policy.controllerPtr_ || policy.timeTrajectory_.empty() || policy.stateTrajectory_.empty()) {
+        std::cerr << "[MegadogWbcRuntime] active MPC policy is incomplete" << std::endl;
+        return false;
+    }
+
+    const scalar_t queryTime =
+        std::clamp(requestedTime, policy.timeTrajectory_.front(), policy.timeTrajectory_.back());
+    if (std::abs(queryTime - requestedTime) > 1e-6) {
+        std::cerr << "[MegadogWbcRuntime] clamped MPC policy query time from " << requestedTime
+                  << " to " << queryTime << std::endl;
+    }
+
+    mpcInput = policy.controllerPtr_->computeInput(queryTime, currentState);
+    mpcState = LinearInterpolation::interpolate(queryTime, policy.timeTrajectory_, policy.stateTrajectory_);
+    mode = safeModeAtTimeOrStance(policy.modeSchedule_, queryTime);
+    return true;
 }
 }  // namespace
 
@@ -393,7 +422,10 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
         }
 
         try {
-            mrt_->evaluatePolicy(observation.time, observation.state, optimizedState, optimizedInput, plannedMode);
+            if (!evaluatePolicyWithoutModeAtTime(*mrt_, observation.time, observation.state, optimizedState, optimizedInput,
+                                                 plannedMode)) {
+                return false;
+            }
         } catch (const std::exception& e) {
             std::cerr << "[MegadogWbcRuntime] MPC policy evaluation failed: " << e.what() << std::endl;
             return false;
@@ -491,6 +523,9 @@ void MegadogWbcRuntime::publishVisualization(const double time_s, const rclcpp::
 {
     if (!visualizer_ || !visualizer_node_ || !visualizer_tf_broadcaster_) {
         return;
+    }
+    if (time_s < last_visualization_time_s_) {
+        last_visualization_time_s_ = std::numeric_limits<double>::lowest();
     }
     if (time_s - last_visualization_time_s_ < visualization_min_period_s_) {
         return;

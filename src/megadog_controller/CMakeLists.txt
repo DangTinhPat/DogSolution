@@ -17,6 +17,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(tf2_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(megadog_wbc REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system filesystem log_setup log)
@@ -30,6 +31,7 @@ set(MEGADOG_CONTROLLER_DEPENDS
   tf2_msgs
   tf2_ros
   geometry_msgs
+  sensor_msgs
   std_msgs
   megadog_wbc
 )

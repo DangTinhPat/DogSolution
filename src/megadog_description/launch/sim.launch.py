@@ -2,9 +2,9 @@
 and megadog_controller (OCS2 SqpMpc + HierarchicalWbc) active, and optionally
 an RViz view of the same live simulation (RobotModel/TF plus megadog_wbc's
 OCS2 desired/optimized trajectory and contact markers - see megadog.rviz).
-Trimmed from babyDog's main_bot/launch/sim.launch.py (no imu_kalman_filter/
-foot_contact_analyzer/leg_pd_controller - megaDog has no state-estimator or
-separate low-level PD controller pipeline yet).
+Simulation now runs the same IMU Kalman path as real hardware for base
+attitude: Gazebo publishes /imu/sim_raw, imu_kalman_filter outputs /imu/data,
+and megadog_controller feeds that attitude into WBC/NMPC.
 """
 
 import os
@@ -45,6 +45,7 @@ def generate_launch_description():
     xacro_file = PathJoinSubstitution([pkg_megadog, 'urdf', 'robot.xacro'])
     default_world = PathJoinSubstitution([pkg_megadog, 'worlds', 'megadog_world.sdf'])
     rviz_config = PathJoinSubstitution([pkg_megadog, 'rviz', 'megadog.rviz'])
+    imu_filter_yaml = os.path.join(pkg_megadog, 'config', 'imu_filter.yaml')
 
     world = LaunchConfiguration('world')
     robot_type = LaunchConfiguration('robot_type')
@@ -139,6 +140,19 @@ def generate_launch_description():
         }],
     )
 
+    imu_kalman_filter = Node(
+        package='imu_kalman_filter',
+        executable='imu_kalman_node',
+        output='screen',
+        parameters=[imu_filter_yaml, {
+            'input_source': 'sensor_msgs',
+            'sensor_topic': '/imu/sim_raw',
+            'output_topic': '/imu/data',
+            'frame_id': 'base_imu',
+            'use_sim_time': use_sim_time,
+        }],
+    )
+
     joint_state_broadcaster_spawner = Node(
         package='controller_manager',
         executable='spawner',
@@ -190,6 +204,7 @@ def generate_launch_description():
         *unset_snap_vars,
         gz_sim,
         gz_bridge,
+        imu_kalman_filter,
         robot_state_publisher,
         spawn_robot,
         spawn_jsb_on_robot_spawned,

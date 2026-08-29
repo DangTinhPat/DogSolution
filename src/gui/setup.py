@@ -14,12 +14,14 @@ setup(
     zip_safe=True,
     maintainer='dvt',
     maintainer_email='dangtinh.ftcpy@gmail.com',
-    description='Tkinter control panel for megaDog sim + RViz (OCS2 visualization).',
+    description='Tkinter control panel for megaDog sim/real bring-up.',
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'gui = gui.main_window:main',
+            'imu_monitor = gui.imu_monitor:main',
+            'imu_measure = gui.imu_measure:main',
         ],
     },
 )

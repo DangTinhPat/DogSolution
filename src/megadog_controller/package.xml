@@ -22,6 +22,7 @@
   <depend>tf2_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>megadog_wbc</depend>
 

@@ -1,11 +1,10 @@
-"""Tkinter control panel for the megadog_description Gazebo sim, RViz view,
-and megadog_controller's FSM (Home/Stand/Trot-in-place/Forward/Backward).
+"""Tkinter control panel for the megadog_description sim/real launch paths,
+RViz views, and megadog_controller's FSM.
 
 Process-control mechanism (subprocess.Popen'd `ros2 launch`, SIGINT->SIGTERM
 escalation via psutil, log panel, kill/shutdown buttons) follows the same
-general shape as other ROS2 sim control panels; no joystick_bridge package or
-real-hardware launch exist for megaDog yet, so those rows are simply absent
-rather than stubbed out.
+general shape as babyDog's proven GUI, but the launch targets point at
+megaDog's own description and controller packages.
 
 Replaces the "open one terminal per task" workflow (launch the sim in one
 terminal, RViz in another, publish FSM commands from a third, kill leftover
@@ -29,6 +28,10 @@ import tkinter.font as tkfont
 from tkinter import scrolledtext, ttk
 
 import psutil
+
+# micro-ROS firmware/agent path used by real hardware is fixed to DDS domain 0.
+# GUI-spawned real launch and RViz real must inherit the same domain.
+os.environ['ROS_DOMAIN_ID'] = '0'
 
 STOP_GRACE_SECONDS = 5
 
@@ -59,10 +62,17 @@ class SimControlGui:
     def __init__(self, root):
         self.root = root
         self.root.title('megaDog Control')
-        self.root.geometry('900x680')
-        self.root.minsize(700, 480)
+        self.root.geometry('980x760')
+        self.root.minsize(780, 540)
 
-        self.procs = {'sim': None, 'rviz': None}
+        self.procs = {
+            'sim': None,
+            'rviz': None,
+            'real': None,
+            'rviz_real': None,
+            'imu_test': None,
+            'imu_monitor': None,
+        }
         self.proc_widgets = {}
         self.fsm_widgets = []
         self.force_widgets = []
@@ -147,6 +157,9 @@ class SimControlGui:
         self.x_var = tk.StringVar(value='0.0')
         self.y_var = tk.StringVar(value='0.0')
         self.z_var = tk.StringVar(value='0.5')
+        self.serial_dev_var = tk.StringVar(value='/dev/ttyUSB0')
+        self.serial_baud_var = tk.StringVar(value='921600')
+        self.real_start_controller_var = tk.BooleanVar(value=False)
 
         fields = [
             ('World (blank = default)', self.world_var, 16),
@@ -184,6 +197,7 @@ class SimControlGui:
             )
         ).pack(side='left')
 
+        self._build_real_panel()
         self._build_fsm_panel()
         self._build_force_panel()
 
@@ -233,6 +247,66 @@ class SimControlGui:
         self.proc_widgets[key] = {'start': start_button, 'stop': stop_button, 'status': status_label}
         self._set_badge(status_label, 'Idle', 'idle')
 
+    def _build_real_panel(self):
+        real_frame = ttk.LabelFrame(self.root, text='REAL HARDWARE', padding=(14, 10))
+        real_frame.pack(fill='x', padx=16, pady=(6, 6))
+
+        real_row = ttk.Frame(real_frame)
+        real_row.pack(fill='x')
+        ttk.Label(real_row, text='Real', style='RowLabel.TLabel', width=6).pack(side='left')
+        self._build_process_controls(
+            real_row, key='real',
+            start_text='▶  Start real hardware',
+            stop_text='■  Stop real hardware')
+
+        ttk.Label(real_row, text='Serial', foreground=FG_MUTED).pack(side='left', padx=(14, 4))
+        ttk.Entry(real_row, textvariable=self.serial_dev_var, width=14).pack(side='left')
+        ttk.Label(real_row, text='Baud', foreground=FG_MUTED).pack(side='left', padx=(10, 4))
+        ttk.Entry(real_row, textvariable=self.serial_baud_var, width=8).pack(side='left')
+        ttk.Checkbutton(
+            real_row,
+            text='Start controller',
+            variable=self.real_start_controller_var,
+        ).pack(side='left', padx=(12, 0))
+
+        rviz_real_row = ttk.Frame(real_frame)
+        rviz_real_row.pack(fill='x', pady=(8, 0))
+        ttk.Label(rviz_real_row, text='RViz', style='RowLabel.TLabel', width=6).pack(side='left')
+        self._build_process_controls(
+            rviz_real_row, key='rviz_real',
+            start_text='▶  Open RViz real',
+            stop_text='■  Close RViz real')
+        ttk.Label(
+            rviz_real_row, foreground=FG_MUTED,
+            text='  (TF/joint_states từ robot thật, chạy song song với Real)'
+        ).pack(side='left')
+
+        imu_test_row = ttk.Frame(real_frame)
+        imu_test_row.pack(fill='x', pady=(8, 0))
+        ttk.Label(imu_test_row, text='IMU', style='RowLabel.TLabel', width=6).pack(side='left')
+        self._build_process_controls(
+            imu_test_row, key='imu_test',
+            start_text='▶  Start IMU-only',
+            stop_text='■  Stop IMU-only')
+        ttk.Label(
+            imu_test_row,
+            foreground=FG_MUTED,
+            text='  (micro-ROS agent + Kalman + monitor raw/filtered, không mở controller)'
+        ).pack(side='left')
+
+        imu_monitor_row = ttk.Frame(real_frame)
+        imu_monitor_row.pack(fill='x', pady=(8, 0))
+        ttk.Label(imu_monitor_row, text='Log IMU', style='RowLabel.TLabel', width=6).pack(side='left')
+        self._build_process_controls(
+            imu_monitor_row, key='imu_monitor',
+            start_text='▶  Open IMU log',
+            stop_text='■  Close IMU log')
+        ttk.Label(
+            imu_monitor_row,
+            foreground=FG_MUTED,
+            text='  (read-only từ /imu/raw mROS + /imu/data Kalman đang chạy)'
+        ).pack(side='left')
+
     def _build_fsm_panel(self):
         # Publishes to megadog_controller's "/megadog/cmd" (std_msgs/String)
         # topic - see MegadogController.cpp's on_configure() subscription for
@@ -241,7 +315,7 @@ class SimControlGui:
         # one-shot commands that switch the WBC's active gait/velocity and
         # keep running until the next command changes it.
         fsm_frame = ttk.LabelFrame(
-            self.root, text='FSM (needs Sim running)', padding=(14, 10))
+            self.root, text='FSM (needs Sim or Real controller running)', padding=(14, 10))
         fsm_frame.pack(fill='x', padx=16, pady=(6, 6))
 
         fsm_row = ttk.Frame(fsm_frame)
@@ -442,10 +516,33 @@ class SimControlGui:
             return cmd
         if key == 'rviz':
             return ['ros2', 'launch', 'megadog_description', 'rz_sim.launch.py', 'use_sim_time:=true']
+        if key == 'real':
+            return [
+                'ros2', 'launch', 'megadog_description', 'real_ros2_control.launch.py',
+                'serial_dev:=' + self.serial_dev_var.get(),
+                'serial_baud:=' + self.serial_baud_var.get(),
+                'start_controller:=' + ('true' if self.real_start_controller_var.get() else 'false'),
+            ]
+        if key == 'rviz_real':
+            return ['ros2', 'launch', 'megadog_description', 'rz_real.launch.py']
+        if key == 'imu_test':
+            return [
+                'ros2', 'launch', 'megadog_description', 'imu_test.launch.py',
+                'serial_dev:=' + self.serial_dev_var.get(),
+                'serial_baud:=' + self.serial_baud_var.get(),
+            ]
+        if key == 'imu_monitor':
+            return ['ros2', 'run', 'gui', 'imu_monitor']
         raise ValueError(key)
 
     def start_process(self, key):
         if self.procs[key] is not None:
+            return
+        if key == 'imu_test' and any(self.procs[name] is not None for name in ('sim', 'real')):
+            self._append_log('IMU-only is isolated: stop Sim/Real before starting it.\n')
+            return
+        if key in ('sim', 'real') and self.procs['imu_test'] is not None:
+            self._append_log('Stop IMU-only before starting Sim/Real.\n')
             return
 
         cmd = self._command_for(key)
@@ -464,9 +561,11 @@ class SimControlGui:
         widgets['start'].configure(state='disabled')
         widgets['stop'].configure(state='normal')
         self._set_badge(widgets['status'], f'Running (pid {proc.pid})', 'running')
-        if key == 'sim':
+        if key == 'sim' or (key == 'real' and self.real_start_controller_var.get()):
             self._set_fsm_controls_enabled(True)
+        if key == 'sim':
             self._set_force_controls_enabled(True)
+        self._refresh_process_interlocks()
 
         threading.Thread(target=self._read_proc_output, args=(key, proc), daemon=True).start()
 
@@ -489,20 +588,45 @@ class SimControlGui:
                     widgets['start'].configure(state='normal')
                     widgets['stop'].configure(state='disabled')
                     self._set_badge(widgets['status'], 'Idle', 'idle')
-                    if key == 'sim':
+                    real_keeps_fsm = self.procs['real'] is not None and self.real_start_controller_var.get()
+                    if key in ('sim', 'real') and self.procs['sim'] is None and not real_keeps_fsm:
                         self._set_fsm_controls_enabled(False)
+                    if key == 'sim':
                         self._set_force_controls_enabled(False)
+                    self._refresh_process_interlocks()
                 elif kind == 'kill_done':
                     self.kill_button.configure(state='normal')
         except queue.Empty:
             pass
         self._poll_log_after_id = self.root.after(100, self._poll_log_queue)
 
+    def _refresh_process_interlocks(self):
+        imu_running = self.procs['imu_test'] is not None
+        sim_or_real_running = self.procs['sim'] is not None or self.procs['real'] is not None
+        for key in ('sim', 'rviz', 'real', 'rviz_real'):
+            widget = self.proc_widgets.get(key, {}).get('start')
+            if widget is not None and self.procs[key] is None:
+                widget.configure(state='disabled' if imu_running else 'normal')
+        imu_start = self.proc_widgets.get('imu_test', {}).get('start')
+        if imu_start is not None and self.procs['imu_test'] is None:
+            imu_start.configure(state='disabled' if sim_or_real_running else 'normal')
+
     def stop_process(self, key):
         proc = self.procs[key]
         if proc is None:
             return
         self._set_badge(self.proc_widgets[key]['status'], 'Stopping...', 'stopping')
+        if key in ('sim', 'real'):
+            other_key = 'real' if key == 'sim' else 'sim'
+            other_keeps_fsm = (
+                other_key == 'sim' and self.procs[other_key] is not None
+            ) or (
+                other_key == 'real' and self.procs[other_key] is not None and self.real_start_controller_var.get()
+            )
+            if not other_keeps_fsm:
+                self._set_fsm_controls_enabled(False)
+        if key == 'sim':
+            self._set_force_controls_enabled(False)
         pid = proc.pid
         self._send_signal_to_group(pid, signal.SIGINT)
         self.root.after(STOP_GRACE_SECONDS * 1000, lambda: self._escalate_stop(key, pid))

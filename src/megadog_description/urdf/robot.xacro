@@ -3,6 +3,8 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robot">
 
     <xacro:arg name="robot_type" default="a1"/>
+    <xacro:arg name="sim" default="true"/>
+    <xacro:arg name="real_hardware" default="false"/>
     <!-- Passed by sim.launch.py; consumed by common/gazebo.xacro to locate
          controllers.yaml for gz_ros2_control. -->
     <xacro:arg name="megadog_share" default=""/>
@@ -19,6 +21,7 @@
     <xacro:include filename="$(arg megadog_description_share)/urdf/common/materials.xacro"/>
     <xacro:include filename="$(arg megadog_description_share)/urdf/common/leg.xacro"/>
     <xacro:include filename="$(arg megadog_description_share)/urdf/common/gazebo.xacro"/>
+    <xacro:include filename="$(arg megadog_description_share)/urdf/common/real_hardware.xacro"/>
     <xacro:include filename="$(arg megadog_description_share)/urdf/common/imu.xacro"/>
 
     <xacro:include filename="$(arg megadog_description_share)/urdf/$(arg robot_type)/const.xacro"/>

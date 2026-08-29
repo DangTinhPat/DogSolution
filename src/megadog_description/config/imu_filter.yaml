@@ -1,0 +1,53 @@
+imu_kalman_filter:
+  ros__parameters:
+    # Hardware mounting transform, expressed as output_axis <- sign * input_axis.
+    # Identity is deliberately conservative until the physical board orientation
+    # is verified with the robot secured. Change only this mapping, never firmware
+    # signs, when adapting the sensor frame to imu_link (x forward, y left, z up).
+    # The permutation/sign combination must remain a right-handed rotation.
+    axis_map: [0, 1, 2]
+    axis_sign: [1.0, 1.0, 1.0]
+    # Sensor-axis acceleration calibration before mapping/rotation. Simulation
+    # is already SI-correct; real hardware overrides this vector.
+    accel_scale: [1.0, 1.0, 1.0]
+    # Proper rotation from the mapped sensor frame into body frame. Simulation
+    # is already aligned; real hardware overrides this in imu_filter_real.yaml.
+    sensor_to_body_rpy_rad: [0.0, 0.0, 0.0]
+    frame_id: imu_link
+
+    # 2 seconds at the 100 Hz firmware/simulation rate. Samples must be
+    # consecutive and stationary; motion restarts calibration.
+    calibration_samples: 200
+    gravity: 9.80665
+    stationary_gyro_threshold: 0.15
+    stationary_accel_threshold: 0.8
+    minimum_dt: 0.001
+    maximum_dt: 0.1
+    stale_timeout_seconds: 0.25
+
+    # Roll/pitch angle+bias Kalman settings. Accelerometer corrections are
+    # automatically down-weighted when |a| differs from gravity.
+    angle_process_variance: 0.001
+    bias_process_variance: 0.003
+    accel_angle_measurement_variance: 0.03
+    adaptive_accel_threshold: 0.5
+    adaptive_accel_gain: 4.0
+    # Reject translational acceleration even when |a| remains close to g.
+    # The residual compares measured specific force with gravity propagated
+    # from the gyro attitude, so real rotation remains observable while trot
+    # acceleration is prevented from masquerading as roll/pitch.
+    adaptive_gravity_residual_threshold: 0.35
+    adaptive_gravity_residual_gain: 8.0
+    maximum_measurement_scale: 100.0
+
+    # Independent scalar Kalman filters for the published accel/gyro fields.
+    # Attitude prediction uses the bias-corrected gyro before this smoothing,
+    # avoiding extra control-path phase lag.
+    accel_process_variance: 0.05
+    accel_measurement_variance: 0.25
+    gyro_process_variance: 0.001
+    gyro_measurement_variance: 0.01
+
+    # MPU6050 has no magnetometer: yaw is gyro-integrated and deliberately
+    # advertised with high uncertainty.
+    yaw_variance: 1000.0

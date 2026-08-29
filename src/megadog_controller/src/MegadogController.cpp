@@ -43,7 +43,7 @@ constexpr double kWalkSpeedMps = 0.18;
 constexpr double kVelocityRampMps2 = 0.8;
 constexpr double kComHeightM = 0.22;
 constexpr double kStandupDurationS = 3.0;
-constexpr double kStandupKp = 22.0;
+constexpr double kStandupKp = 35.0;
 constexpr double kStandupKd = 1.8;
 constexpr double kWbcHfePostureKp = 0.0;
 constexpr double kWbcKfePostureKp = 0.0;
@@ -142,6 +142,32 @@ double quatToPitch(double w, double x, double y, double z)
 double quatToRoll(double w, double x, double y, double z)
 {
     return std::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
+}
+
+std::array<double, 3> bodyAngularVelocityToEulerZyxRate(const std::array<double, 3>& euler_zyx_rad,
+                                                        const std::array<double, 3>& omega_body_rad_s)
+{
+    const double roll = euler_zyx_rad[2];
+    const double pitch = euler_zyx_rad[1];
+    const double wx = omega_body_rad_s[0];
+    const double wy = omega_body_rad_s[1];
+    const double wz = omega_body_rad_s[2];
+    const double cos_pitch = std::cos(pitch);
+    if (std::abs(cos_pitch) < 0.05 || !std::isfinite(cos_pitch)) {
+        return {0.0, 0.0, 0.0};
+    }
+    const double sin_roll = std::sin(roll);
+    const double cos_roll = std::cos(roll);
+    const double tan_pitch = std::tan(pitch);
+    const double roll_dot = wx + sin_roll * tan_pitch * wy + cos_roll * tan_pitch * wz;
+    const double pitch_dot = cos_roll * wy - sin_roll * wz;
+    const double yaw_dot = (sin_roll * wy + cos_roll * wz) / cos_pitch;
+    return {yaw_dot, pitch_dot, roll_dot};
+}
+
+bool finiteArray(const std::array<double, 3>& values)
+{
+    return std::all_of(values.begin(), values.end(), [](const double value) { return std::isfinite(value); });
 }
 
 const char* fsmStateName(const MegadogFsmState state)
@@ -284,6 +310,53 @@ controller_interface::CallbackReturn MegadogController::on_configure(const rclcp
         },
         sim_base_options);
 
+    real_imu_callback_group_ = get_node()->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions real_imu_options;
+    real_imu_options.callback_group = real_imu_callback_group_;
+    real_imu_subscription_ = get_node()->create_subscription<sensor_msgs::msg::Imu>(
+        "/imu/data", rclcpp::SensorDataQoS(),
+        [this](const sensor_msgs::msg::Imu::SharedPtr msg)
+        {
+            const double qw = msg->orientation.w;
+            const double qx = msg->orientation.x;
+            const double qy = msg->orientation.y;
+            const double qz = msg->orientation.z;
+            const double q_norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+            const std::array<double, 3> omega_body{
+                msg->angular_velocity.x,
+                msg->angular_velocity.y,
+                msg->angular_velocity.z,
+            };
+            const std::array<double, 3> linear_accel{
+                msg->linear_acceleration.x,
+                msg->linear_acceleration.y,
+                msg->linear_acceleration.z,
+            };
+            const bool finite_imu = std::isfinite(q_norm) && q_norm > 0.5 &&
+                finiteArray(omega_body) && finiteArray(linear_accel);
+            if (!finite_imu) {
+                return;
+            }
+            const double inv_norm = 1.0 / q_norm;
+            const double nw = qw * inv_norm, nx = qx * inv_norm, ny = qy * inv_norm, nz = qz * inv_norm;
+
+            RealImuSample next;
+            next.euler_zyx_rad = {quatToYaw(nw, nx, ny, nz), quatToPitch(nw, nx, ny, nz), quatToRoll(nw, nx, ny, nz)};
+            next.orientation_wxyz = {nw, nx, ny, nz};
+            next.angular_velocity_body_rad_s = omega_body;
+            next.linear_acceleration_m_s2 = linear_accel;
+            next.euler_zyx_rate_rad_s = bodyAngularVelocityToEulerZyxRate(next.euler_zyx_rad, omega_body);
+            next.stamp = std::chrono::steady_clock::now();
+            next.has_data = finiteArray(next.euler_zyx_rad) && finiteArray(next.euler_zyx_rate_rad_s);
+            if (!next.has_data) {
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(sim_base_mutex_);
+            latest_real_imu_state_ = next;
+        },
+        real_imu_options);
+
     cmd_callback_group_ = get_node()->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     rclcpp::SubscriptionOptions cmd_options;
     cmd_options.callback_group = cmd_callback_group_;
@@ -372,13 +445,18 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
     }
 
     SimBaseSample base_sample;
+    RealImuSample imu_sample;
     bool base_fresh;
+    bool imu_fresh;
     {
         std::lock_guard<std::mutex> lock(sim_base_mutex_);
         base_sample = latest_sim_base_state_;
+        imu_sample = latest_real_imu_state_;
         const auto now = std::chrono::steady_clock::now();
         base_fresh = base_sample.has_data && std::chrono::duration<double>(now - base_sample.stamp).count() < 0.2;
+        imu_fresh = imu_sample.has_data && std::chrono::duration<double>(now - imu_sample.stamp).count() < 0.2;
     }
+    const char* base_source = base_fresh && imu_fresh ? "sim+imu" : (base_fresh ? "sim" : (imu_fresh ? "imu" : "none"));
 
     megadog::hwbc::MegadogWbcMeasurement measurement;
     std::array<double, 12> measured_velocity{};
@@ -428,9 +506,10 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         }
 
         measurement.base_pos_m = base_sample.position_m;
-        measurement.base_euler_zyx_rad = base_sample.euler_zyx_rad;
+        measurement.base_euler_zyx_rad = imu_fresh ? imu_sample.euler_zyx_rad : base_sample.euler_zyx_rad;
         measurement.base_linear_vel_m_s = filtered_base_linear_velocity_m_s_;
-        measurement.base_euler_zyx_rate_rad_s = filtered_base_euler_zyx_rate_rad_s_;
+        measurement.base_euler_zyx_rate_rad_s =
+            imu_fresh ? imu_sample.euler_zyx_rate_rad_s : filtered_base_euler_zyx_rate_rad_s_;
 
         // Same ground-truth pose, republished as a standard "odom" -> "base"
         // TF - see odom_tf_broadcaster_'s doc comment in the header for why
@@ -445,17 +524,43 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             odom_tf.transform.translation.x = base_sample.position_m[0];
             odom_tf.transform.translation.y = base_sample.position_m[1];
             odom_tf.transform.translation.z = base_sample.position_m[2];
-            odom_tf.transform.rotation.w = base_sample.orientation_wxyz[0];
-            odom_tf.transform.rotation.x = base_sample.orientation_wxyz[1];
-            odom_tf.transform.rotation.y = base_sample.orientation_wxyz[2];
-            odom_tf.transform.rotation.z = base_sample.orientation_wxyz[3];
+            const auto& orientation = imu_fresh ? imu_sample.orientation_wxyz : base_sample.orientation_wxyz;
+            odom_tf.transform.rotation.w = orientation[0];
+            odom_tf.transform.rotation.x = orientation[1];
+            odom_tf.transform.rotation.y = orientation[2];
+            odom_tf.transform.rotation.z = orientation[3];
+            odom_tf_broadcaster_->sendTransform(odom_tf);
+        }
+    } else if (imu_fresh) {
+        // Real hardware estimator v0: IMU supplies attitude and angular rate;
+        // translational odometry is deliberately held at a local origin until
+        // leg odometry/contact fusion is added. This is enough for WBC/NMPC to
+        // see body roll/pitch disturbances instead of the old zero-attitude
+        // placeholder, while avoiding unbounded acceleration integration.
+        measurement.base_pos_m = {0.0, 0.0, kComHeightM};
+        measurement.base_euler_zyx_rad = imu_sample.euler_zyx_rad;
+        measurement.base_linear_vel_m_s = {0.0, 0.0, 0.0};
+        measurement.base_euler_zyx_rate_rad_s = imu_sample.euler_zyx_rate_rad_s;
+        last_control_base_sample_valid_ = false;
+        filtered_base_linear_velocity_m_s_ = {};
+        filtered_base_euler_zyx_rate_rad_s_ = {};
+
+        if (odom_tf_broadcaster_) {
+            geometry_msgs::msg::TransformStamped odom_tf;
+            odom_tf.header.stamp = time;
+            odom_tf.header.frame_id = "odom";
+            odom_tf.child_frame_id = "base";
+            odom_tf.transform.translation.x = measurement.base_pos_m[0];
+            odom_tf.transform.translation.y = measurement.base_pos_m[1];
+            odom_tf.transform.translation.z = measurement.base_pos_m[2];
+            odom_tf.transform.rotation.w = imu_sample.orientation_wxyz[0];
+            odom_tf.transform.rotation.x = imu_sample.orientation_wxyz[1];
+            odom_tf.transform.rotation.y = imu_sample.orientation_wxyz[2];
+            odom_tf.transform.rotation.z = imu_sample.orientation_wxyz[3];
             odom_tf_broadcaster_->sendTransform(odom_tf);
         }
     } else {
-        // No ground-truth pose yet (e.g. gz_bridge not up) - fall back to a
-        // fixed nominal standing pose so the MPC/WBC still gets something
-        // finite rather than never running at all.
-        measurement.base_pos_m = {0.0, 0.0, 0.3};
+        measurement.base_pos_m = {0.0, 0.0, kComHeightM};
         last_control_base_sample_valid_ = false;
         filtered_base_linear_velocity_m_s_ = {};
         filtered_base_euler_zyx_rate_rad_s_ = {};
@@ -565,14 +670,24 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
                 ? kStandupDurationS
                 : locomotion_runtime_epoch_wbc_time_s_;
         const double runtime_time_s = std::max(0.0, wbc_time_s_ - runtime_epoch_s);
-        if (!runtime_) {
+        if (!base_fresh && !imu_fresh) {
+            if (!runtime_failure_reported_) {
+                RCLCPP_WARN(
+                    get_node()->get_logger(),
+                    "MegadogController has no fresh /sim/model_poses or /imu/data; WBC/NMPC held");
+                runtime_failure_reported_ = true;
+            }
+            ok = false;
+        } else if (!runtime_) {
             runtime_ = std::make_unique<megadog::hwbc::MegadogWbcRuntime>(makeDevqWbcConfig(), true);
             if (!runtime_->ready()) {
                 RCLCPP_ERROR(get_node()->get_logger(), "MegadogWbcRuntime failed to initialize");
                 runtime_.reset();
             }
         }
-        ok = runtime_ && runtime_->ready() && runtime_->update(runtime_time_s, dt, time, measurement, command, result);
+        if (base_fresh || imu_fresh) {
+            ok = runtime_ && runtime_->ready() && runtime_->update(runtime_time_s, dt, time, measurement, command, result);
+        }
         if (ok && result.valid) {
             for (std::size_t j = 0; j < jointNames().size(); ++j) {
                 double posture_torque = 0.0;
@@ -590,7 +705,9 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             runtime_failure_reported_ = false;
         } else {
             if (!runtime_failure_reported_) {
-                RCLCPP_WARN(get_node()->get_logger(), "MegadogWbcRuntime produced no valid sample; holding last valid effort");
+                if (base_fresh || imu_fresh) {
+                    RCLCPP_WARN(get_node()->get_logger(), "MegadogWbcRuntime produced no valid sample; holding last valid effort");
+                }
                 runtime_failure_reported_ = true;
             }
             effort = has_last_valid_effort_ ? last_valid_effort_ : effort;
@@ -606,7 +723,7 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         diagnostics_elapsed_s_ = 0.0;
         RCLCPP_INFO(
             get_node()->get_logger(),
-            "MegadogController: t=%.2f wbc_t=%.2f state=%s valid=%d base_fresh=%d vx=%.3f eom=%.4f "
+            "MegadogController: t=%.2f wbc_t=%.2f state=%s valid=%d base_source=%s sim_fresh=%d imu_fresh=%d vx=%.3f eom=%.4f "
             "base=[z %.3f yaw %.3f pitch %.3f roll %.3f vz %.3f wyaw %.3f wpitch %.3f wroll %.3f] "
             "HAA_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
             "HFE_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
@@ -620,7 +737,8 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             "HAA_eff=[LF %.2f LH %.2f RF %.2f RH %.2f] "
             "HFE_eff=[LF %.2f LH %.2f RF %.2f RH %.2f] "
             "KFE_eff=[LF %.2f LH %.2f RF %.2f RH %.2f]",
-            elapsed_s_, wbc_time_s_, fsmStateName(fsm_state), ok && result.valid ? 1 : 0, base_fresh ? 1 : 0,
+            elapsed_s_, wbc_time_s_, fsmStateName(fsm_state), ok && result.valid ? 1 : 0, base_source,
+            base_fresh ? 1 : 0, imu_fresh ? 1 : 0,
             smoothed_velocity_x_m_s_, result.eom_residual_norm,
             measurement.base_pos_m[2], measurement.base_euler_zyx_rad[0], measurement.base_euler_zyx_rad[1],
             measurement.base_euler_zyx_rad[2], measurement.base_linear_vel_m_s[2],

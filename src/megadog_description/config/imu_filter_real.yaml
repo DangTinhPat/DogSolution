@@ -1,0 +1,13 @@
+imu_kalman_filter:
+  ros__parameters:
+    # Uniform one-point scale from the mean of stable 10 s HOME and Stand
+    # windows on 2026-08-21: 9.80665 / 7.650638256 = 1.281808089.
+    # This corrects gravity norm before calibration/Kalman; a future six-face
+    # calibration may replace it with independent axis scale/bias values.
+    accel_scale: [1.2818080887, 1.2818080887, 1.2818080887]
+    # Fixed mapped-sensor -> body rotation measured at HOME on a flat surface,
+    # 2026-08-20. 475 post-Kalman samples over 5 s:
+    # roll=+1.239690290 deg, pitch=-3.746790025 deg. A 2026-08-21 attempt to
+    # re-zero from one prone placement failed repeatability after restart, so
+    # it was rejected. Yaw mounting remains zero; world yaw resets on Trot entry.
+    sensor_to_body_rpy_rad: [0.0216366773, -0.0653938223, 0.0]
