@@ -10,18 +10,25 @@
 // hybridJointHandles_[j].setCommand(pos,vel,kp=0,kd=3,ff) call) is computed
 // directly here: effort = torque_ff + kd * (velocity_desired - velocity_measured).
 //
-// State estimation: always /imu/data (same IMU+Kalman pipeline in sim and on
-// real hardware, see imu_kalman_filter) for base roll/pitch/yaw, angular
-// velocity, and linear acceleration - sim no longer takes a shortcut through
-// Gazebo's ground-truth model pose, so sim state estimation matches what the
-// real robot actually has available. Base position/velocity are estimated
-// downstream, inside megadog_wbc's BaseStateEstimator (IMU + joint encoders +
-// gait-schedule contact leg odometry) - see MegadogWbcMeasurement's doc
-// comment in MegadogWbcRuntime.h.
+// State estimation: sim uses Gazebo's own ground-truth model pose for base
+// position/orientation/velocity (/sim/model_poses) - matching ultraDog's
+// real-A1-scale sibling exactly, which is proven stable over long trot runs
+// this way. Real hardware has no such ground truth, so it falls back to
+// megadog_wbc's BaseStateEstimator (IMU + joint encoders + gait-schedule
+// contact leg odometry) - see MegadogWbcMeasurement::base_pose_is_ground_truth
+// in MegadogWbcRuntime.h for how MegadogWbcRuntime picks between the two.
+// (An earlier revision of this file replaced ground truth with the estimator
+// unconditionally, in sim too - a rigorous multi-agent investigation traced
+// megaDog's ~15-25s trot instability directly to that: dead-reckoning drift
+// with no absolute-position correction, that ultraDog's ground-truth path
+// never has to contend with. Restoring ground truth for sim, and reserving
+// the estimator for when it's genuinely needed (no ground truth available),
+// fixed it.)
 
 #include <controller_interface/controller_interface.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include "megadog_wbc/MegadogWbcRuntime.h"
@@ -74,6 +81,20 @@ public:
     controller_interface::return_type update(const rclcpp::Time& time, const rclcpp::Duration& period) override;
 
 private:
+    struct SimBaseSample
+    {
+        std::array<double, 3> position_m{};
+        std::array<double, 3> euler_zyx_rad{};
+        // Raw normalized quaternion (w,x,y,z), kept alongside euler_zyx_rad
+        // so publishOdomTf() can broadcast "odom" -> "base" directly without
+        // a lossy euler round-trip - defaults to identity.
+        std::array<double, 4> orientation_wxyz{1.0, 0.0, 0.0, 0.0};
+        std::array<double, 3> linear_velocity_m_s{};
+        std::array<double, 3> euler_zyx_rate_rad_s{};
+        std::chrono::steady_clock::time_point stamp{};
+        bool has_data = false;
+    };
+
     struct RealImuSample
     {
         std::array<double, 3> euler_zyx_rad{};
@@ -88,14 +109,27 @@ private:
     static const std::vector<std::string>& jointNames();
 
     std::unique_ptr<megadog::hwbc::MegadogWbcRuntime> runtime_;
+    // A MutuallyExclusive callback group serializes invocations in arrival
+    // order, so consecutive callback calls never race on
+    // latest_sim_base_state_ writes.
+    rclcpp::CallbackGroup::SharedPtr sim_base_callback_group_;
+    rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sim_base_subscription_;
     rclcpp::CallbackGroup::SharedPtr real_imu_callback_group_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr real_imu_subscription_;
-    // Broadcasts "odom" -> "base" every control tick from the IMU sample
-    // (orientation only - translation is pinned at the local origin, see
-    // update()'s imu_fresh branch), so RViz can set Fixed Frame to "odom".
+    // Broadcasts "odom" -> "base" every control tick from the same
+    // ground-truth pose sim_base_subscription_ already receives (or, on real
+    // hardware with no ground truth, the IMU sample's orientation only), so
+    // RViz can set Fixed Frame to "odom" and see the robot actually walk
+    // through the world instead of always rendering pinned at the origin.
     std::unique_ptr<tf2_ros::TransformBroadcaster> odom_tf_broadcaster_;
+    std::mutex sim_base_mutex_;
+    SimBaseSample latest_sim_base_state_;
     std::mutex imu_mutex_;
     RealImuSample latest_real_imu_state_;
+    SimBaseSample last_control_base_sample_;
+    bool last_control_base_sample_valid_ = false;
+    std::array<double, 3> filtered_base_linear_velocity_m_s_{};
+    std::array<double, 3> filtered_base_euler_zyx_rate_rad_s_{};
 
     rclcpp::CallbackGroup::SharedPtr cmd_callback_group_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr cmd_subscription_;

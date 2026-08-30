@@ -95,6 +95,34 @@ double clampJointTorque(const std::size_t joint_index, const double torque)
 // WbcBase.h's own defaults (350/37/400/140/400/100/400/140) are qm_control's
 // Aliengo-scale starting point, left as the library's generic baseline -
 // megaDog's devq-scaled profile is built explicitly here instead.
+//
+// (A same-session experiment tried matching ultraDog's own unmodified
+// `HierarchicalWbcConfig{}` exactly instead - on the theory that these gains
+// shouldn't need devq-specific scaling at all, since upstream A1/Go1/Aliengo
+// configs don't scale them either. That is only half right: swing_kp/kd and
+// base_angular_kp/kd genuinely don't need it (matching ultraDog there caused
+// no regression). But leg_posture_task_weight=0 - ultraDog/library's default,
+// posture task disabled - is NOT safe for devq specifically: with all 4 feet
+// planted, formulateNoContactMotionTask()'s per-leg foot-Jacobian equality
+// constrains the *combination* of joint accelerations needed to hold the
+// foot still, but leaves the leg's internal (HFE,KFE) null-space direction
+// completely free; with the posture task disabled nothing pulls that
+// direction back toward task.info's nominal joint targets, so it drifts -
+// slowly at first (an observed ~0.22->0.30m base-height creep during plain
+// STAND), then catastrophically once a leg's HFE/KFE drifts far enough to
+// approach devq's calf_position_max=0.0 kinematic singularity, at which
+// point the foot Jacobian loses rank. devq's shorter legs (thigh=calf=
+// 0.15m, vs. real A1's longer legs) sit closer to this singularity at the
+// nominal standing joint fraction-of-range than ultraDog's A1 does, which is
+// the likely reason ultraDog can run this task disabled safely while megaDog
+// cannot - a genuine physical difference, not an arbitrary tuning choice.
+// Re-enabling leg_posture (below) alone, on top of ultraDog's swing_kp/kd,
+// was tried and made trot fail FASTER (~6-8s in, vs. the disabled-posture
+// version's ~10-20s creep-then-fall) - the two are evidently tuned as a
+// pair, not independently swappable, so this reverts to the original
+// devq-scaled swing/base_angular values leg_posture=65/10/22 was actually
+// validated alongside, rather than mixing a validated posture gain with an
+// unvalidated swing gain.)
 megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
 {
     megadog::hwbc::HierarchicalWbcConfig config;
@@ -111,6 +139,10 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     config.haa_posture_kd = 20.0;
     config.haa_posture_task_weight = 80.0;
     config.haa_posture_nominal_rad = {-0.30, -0.30, 0.30, 0.30};
+    // leg_posture_task_weight must stay > 0 (see the long comment above) -
+    // this is the one non-negotiable devq-specific WBC gain found this
+    // session, everything else here is otherwise-standard devq-length-scaled
+    // tuning predating today's ground-truth/GaitSchedule-mutex fixes.
     config.leg_posture_kp = 65.0;
     config.leg_posture_kd = 10.0;
     config.leg_posture_task_weight = 22.0;
@@ -244,6 +276,72 @@ controller_interface::CallbackReturn MegadogController::on_configure(const rclcp
 {
     odom_tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(get_node());
 
+    // A MutuallyExclusive callback group serializes invocations in arrival
+    // order, so consecutive callback calls never race on
+    // latest_sim_base_state_ writes.
+    sim_base_callback_group_ = get_node()->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions sim_base_options;
+    sim_base_options.callback_group = sim_base_callback_group_;
+    sim_base_subscription_ = get_node()->create_subscription<tf2_msgs::msg::TFMessage>(
+        "/sim/model_poses", rclcpp::SensorDataQoS(),
+        [this](const tf2_msgs::msg::TFMessage::SharedPtr msg)
+        {
+            // The ros_gz_bridge conversion for this topic does not populate
+            // child_frame_id, so the base link can't be matched by name -
+            // index 0 is used instead (SDF/Gazebo emits poses in model/link
+            // declaration order, and "base" is A1's first declared link in
+            // robot.xacro). If base_fresh diagnostics ever look wrong (e.g.
+            // z height tracking a leg instead of the trunk), re-derive the
+            // correct index empirically.
+            if (msg->transforms.empty()) {
+                return;
+            }
+            const geometry_msgs::msg::TransformStamped* base = &msg->transforms[0];
+            const double qw = base->transform.rotation.w;
+            const double qx = base->transform.rotation.x;
+            const double qy = base->transform.rotation.y;
+            const double qz = base->transform.rotation.z;
+            const double q_norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+            const bool finite_pose = std::isfinite(base->transform.translation.x) &&
+                std::isfinite(base->transform.translation.y) && std::isfinite(base->transform.translation.z) &&
+                std::isfinite(q_norm) && q_norm > 0.5;
+            if (!finite_pose) {
+                return;
+            }
+            const double inv_norm = 1.0 / q_norm;
+            const double nw = qw * inv_norm, nx = qx * inv_norm, ny = qy * inv_norm, nz = qz * inv_norm;
+
+            SimBaseSample next;
+            next.position_m = {base->transform.translation.x, base->transform.translation.y,
+                               base->transform.translation.z};
+            next.euler_zyx_rad = {quatToYaw(nw, nx, ny, nz), quatToPitch(nw, nx, ny, nz), quatToRoll(nw, nx, ny, nz)};
+            next.orientation_wxyz = {nw, nx, ny, nz};
+            next.stamp = std::chrono::steady_clock::now();
+            next.has_data = true;
+
+            std::lock_guard<std::mutex> lock(sim_base_mutex_);
+            // Freshness only needs a recent pose sample - velocity is a
+            // best-effort finite difference against whatever the previous
+            // sample was, skipped only when dt is too small to divide by
+            // safely. Messages can arrive in tight bursts, so dt between two
+            // consecutive callback invocations is not a reliable proxy for
+            // the topic's true update period; requiring a "reasonable" dt
+            // window here just made freshness flicker without adding safety.
+            if (latest_sim_base_state_.has_data) {
+                const double dt = std::chrono::duration<double>(next.stamp - latest_sim_base_state_.stamp).count();
+                if (dt > 1e-6) {
+                    for (int i = 0; i < 3; ++i) {
+                        next.linear_velocity_m_s[i] = (next.position_m[i] - latest_sim_base_state_.position_m[i]) / dt;
+                        double delta = next.euler_zyx_rad[i] - latest_sim_base_state_.euler_zyx_rad[i];
+                        delta = std::atan2(std::sin(delta), std::cos(delta));
+                        next.euler_zyx_rate_rad_s[i] = delta / dt;
+                    }
+                }
+            }
+            latest_sim_base_state_ = next;
+        },
+        sim_base_options);
+
     real_imu_callback_group_ = get_node()->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     rclcpp::SubscriptionOptions real_imu_options;
     real_imu_options.callback_group = real_imu_callback_group_;
@@ -348,6 +446,10 @@ controller_interface::CallbackReturn MegadogController::on_activate(const rclcpp
     latched_base_position_reference_m_ = {};
     latched_base_yaw_reference_rad_ = 0.0;
     base_reference_latched_ = false;
+    last_control_base_sample_ = {};
+    last_control_base_sample_valid_ = false;
+    filtered_base_linear_velocity_m_s_ = {};
+    filtered_base_euler_zyx_rate_rad_s_ = {};
     state_entered_wbc_time_s_ = 0.0;
     locomotion_runtime_epoch_wbc_time_s_ = 0.0;
     smoothed_velocity_x_m_s_ = 0.0;
@@ -374,8 +476,16 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         start_time_s_ = 0.0;
     }
 
+    SimBaseSample base_sample;
     RealImuSample imu_sample;
+    bool base_fresh;
     bool imu_fresh;
+    {
+        std::lock_guard<std::mutex> lock(sim_base_mutex_);
+        base_sample = latest_sim_base_state_;
+        const auto now = std::chrono::steady_clock::now();
+        base_fresh = base_sample.has_data && std::chrono::duration<double>(now - base_sample.stamp).count() < 0.2;
+    }
     {
         std::lock_guard<std::mutex> lock(imu_mutex_);
         imu_sample = latest_real_imu_state_;
@@ -395,18 +505,90 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         measured_velocity[j] = vel;
     }
 
-    if (imu_fresh) {
-        // Same on sim and real hardware: attitude/angular rate/linear
-        // acceleration all come from /imu/data. base_pos_m/base_linear_vel_m_s
-        // here are just placeholders - MegadogWbcRuntime's BaseStateEstimator
-        // overwrites both every tick with its own leg-odometry estimate
-        // (IMU + joint encoders + gait-schedule contact), so what's set here
-        // is never actually used by WBC/NMPC.
+    if (base_fresh) {
+        // Ground truth available (sim only) - use it directly, exactly like
+        // ultraDog does, with no estimator in the loop at all. See
+        // base_pose_is_ground_truth's doc comment in MegadogWbcRuntime.h for
+        // why MegadogWbcRuntime must be told this explicitly rather than
+        // inferring it from which fields are populated.
+        if (last_control_base_sample_valid_ && base_sample.stamp > last_control_base_sample_.stamp) {
+            const double base_dt =
+                std::chrono::duration<double>(base_sample.stamp - last_control_base_sample_.stamp).count();
+            if (base_dt > 1e-4 && base_dt < 0.2) {
+                constexpr double kBaseVelocityFilterAlpha = 0.35;
+                for (int i = 0; i < 3; ++i) {
+                    const double raw_linear =
+                        (base_sample.position_m[i] - last_control_base_sample_.position_m[i]) / base_dt;
+                    double raw_euler = base_sample.euler_zyx_rad[i] - last_control_base_sample_.euler_zyx_rad[i];
+                    raw_euler = std::atan2(std::sin(raw_euler), std::cos(raw_euler)) / base_dt;
+                    if (std::isfinite(raw_linear)) {
+                        filtered_base_linear_velocity_m_s_[i] +=
+                            kBaseVelocityFilterAlpha * (raw_linear - filtered_base_linear_velocity_m_s_[i]);
+                    }
+                    if (std::isfinite(raw_euler)) {
+                        filtered_base_euler_zyx_rate_rad_s_[i] +=
+                            kBaseVelocityFilterAlpha * (raw_euler - filtered_base_euler_zyx_rate_rad_s_[i]);
+                    }
+                }
+            }
+        } else if (!last_control_base_sample_valid_) {
+            filtered_base_linear_velocity_m_s_ = {};
+            filtered_base_euler_zyx_rate_rad_s_ = {};
+        } else {
+            for (int i = 0; i < 3; ++i) {
+                filtered_base_linear_velocity_m_s_[i] *= 0.995;
+                filtered_base_euler_zyx_rate_rad_s_[i] *= 0.995;
+            }
+        }
+        if (!last_control_base_sample_valid_ || base_sample.stamp > last_control_base_sample_.stamp) {
+            last_control_base_sample_ = base_sample;
+            last_control_base_sample_valid_ = true;
+        }
+
+        measurement.base_pos_m = base_sample.position_m;
+        measurement.base_euler_zyx_rad = imu_fresh ? imu_sample.euler_zyx_rad : base_sample.euler_zyx_rad;
+        measurement.base_linear_vel_m_s = filtered_base_linear_velocity_m_s_;
+        measurement.base_euler_zyx_rate_rad_s =
+            imu_fresh ? imu_sample.euler_zyx_rate_rad_s : filtered_base_euler_zyx_rate_rad_s_;
+        measurement.base_linear_accel_local_m_s2 = imu_fresh ? imu_sample.linear_acceleration_m_s2 : std::array<double, 3>{};
+        measurement.base_pose_is_ground_truth = true;
+
+        // Same ground-truth pose, republished as a standard "odom" -> "base"
+        // TF - see odom_tf_broadcaster_'s doc comment in the header for why
+        // this exists (RViz's Fixed Frame can be "odom" instead of always
+        // "base", so the body's actual walking motion through the world is
+        // visible instead of only the legs moving relative to a pinned base).
+        if (odom_tf_broadcaster_) {
+            geometry_msgs::msg::TransformStamped odom_tf;
+            odom_tf.header.stamp = time;
+            odom_tf.header.frame_id = "odom";
+            odom_tf.child_frame_id = "base";
+            odom_tf.transform.translation.x = base_sample.position_m[0];
+            odom_tf.transform.translation.y = base_sample.position_m[1];
+            odom_tf.transform.translation.z = base_sample.position_m[2];
+            const auto& orientation = imu_fresh ? imu_sample.orientation_wxyz : base_sample.orientation_wxyz;
+            odom_tf.transform.rotation.w = orientation[0];
+            odom_tf.transform.rotation.x = orientation[1];
+            odom_tf.transform.rotation.y = orientation[2];
+            odom_tf.transform.rotation.z = orientation[3];
+            odom_tf_broadcaster_->sendTransform(odom_tf);
+        }
+    } else if (imu_fresh) {
+        // No ground truth (real hardware, or sim without /sim/model_poses
+        // bridged): attitude/angular rate/linear acceleration come from
+        // /imu/data. base_pos_m/base_linear_vel_m_s here are just
+        // placeholders - MegadogWbcRuntime's BaseStateEstimator overwrites
+        // both every tick with its own leg-odometry estimate (IMU + joint
+        // encoders + gait-schedule contact), since base_pose_is_ground_truth
+        // is left false below.
         measurement.base_pos_m = {0.0, 0.0, kComHeightM};
         measurement.base_euler_zyx_rad = imu_sample.euler_zyx_rad;
         measurement.base_linear_vel_m_s = {0.0, 0.0, 0.0};
         measurement.base_euler_zyx_rate_rad_s = imu_sample.euler_zyx_rate_rad_s;
         measurement.base_linear_accel_local_m_s2 = imu_sample.linear_acceleration_m_s2;
+        last_control_base_sample_valid_ = false;
+        filtered_base_linear_velocity_m_s_ = {};
+        filtered_base_euler_zyx_rate_rad_s_ = {};
 
         if (odom_tf_broadcaster_) {
             geometry_msgs::msg::TransformStamped odom_tf;
@@ -424,6 +606,9 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         }
     } else {
         measurement.base_pos_m = {0.0, 0.0, kComHeightM};
+        last_control_base_sample_valid_ = false;
+        filtered_base_linear_velocity_m_s_ = {};
+        filtered_base_euler_zyx_rate_rad_s_ = {};
     }
 
     const auto fsm_state = static_cast<MegadogFsmState>(fsm_state_.load(std::memory_order_relaxed));
@@ -530,11 +715,11 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
                 ? kStandupDurationS
                 : locomotion_runtime_epoch_wbc_time_s_;
         const double runtime_time_s = std::max(0.0, wbc_time_s_ - runtime_epoch_s);
-        if (!imu_fresh) {
+        if (!base_fresh && !imu_fresh) {
             if (!runtime_failure_reported_) {
                 RCLCPP_WARN(
                     get_node()->get_logger(),
-                    "MegadogController has no fresh /imu/data; WBC/NMPC held");
+                    "MegadogController has no fresh /sim/model_poses or /imu/data; WBC/NMPC held");
                 runtime_failure_reported_ = true;
             }
             ok = false;
@@ -545,7 +730,7 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
                 runtime_.reset();
             }
         }
-        if (imu_fresh) {
+        if (base_fresh || imu_fresh) {
             ok = runtime_ && runtime_->ready() && runtime_->update(runtime_time_s, dt, time, measurement, command, result);
         }
         if (ok && result.valid) {
@@ -565,7 +750,7 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             runtime_failure_reported_ = false;
         } else {
             if (!runtime_failure_reported_) {
-                if (imu_fresh) {
+                if (base_fresh || imu_fresh) {
                     RCLCPP_WARN(get_node()->get_logger(), "MegadogWbcRuntime produced no valid sample; holding last valid effort");
                 }
                 runtime_failure_reported_ = true;
@@ -583,7 +768,7 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         diagnostics_elapsed_s_ = 0.0;
         RCLCPP_INFO(
             get_node()->get_logger(),
-            "MegadogController: t=%.2f wbc_t=%.2f state=%s valid=%d imu_fresh=%d vx=%.3f eom=%.4f "
+            "MegadogController: t=%.2f wbc_t=%.2f state=%s valid=%d base_src=%s imu_fresh=%d vx=%.3f eom=%.4f "
             "base=[z %.3f yaw %.3f pitch %.3f roll %.3f vz %.3f wyaw %.3f wpitch %.3f wroll %.3f] "
             "HAA_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
             "HFE_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
@@ -598,7 +783,7 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             "HFE_eff=[LF %.2f LH %.2f RF %.2f RH %.2f] "
             "KFE_eff=[LF %.2f LH %.2f RF %.2f RH %.2f]",
             elapsed_s_, wbc_time_s_, fsmStateName(fsm_state), ok && result.valid ? 1 : 0,
-            imu_fresh ? 1 : 0,
+            base_fresh ? "gt" : (imu_fresh ? "imu" : "none"), imu_fresh ? 1 : 0,
             smoothed_velocity_x_m_s_, result.eom_residual_norm,
             measurement.base_pos_m[2], measurement.base_euler_zyx_rad[0], measurement.base_euler_zyx_rad[1],
             measurement.base_euler_zyx_rad[2], measurement.base_linear_vel_m_s[2],

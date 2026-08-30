@@ -279,12 +279,39 @@ bool MegadogWbcRuntime::setGaitTemplateIfNeeded(const std::string& gait_name, co
     if (requested == active_gait_name_ && time_s + horizon < gait_schedule_valid_until_s_) {
         return true;
     }
+    const auto& gaitSchedule = interface_->getSwitchedModelReferenceManagerPtr()->getGaitSchedule();
+    const bool is_actual_gait_change = requested != active_gait_name_;
+    if (!is_actual_gait_change) {
+        // Same-gait "keepalive" refresh (not a gait change) - just the schedule's own
+        // valid-until horizon running low on a long-held gait (e.g. FORWARD/TROT_IN_PLACE
+        // left running for a while). Two separate bugs used to live here, both traced to
+        // calling insertModeSequenceTemplate() unconditionally on every refresh:
+        //  1. It always spliced in a forced phaseTransitionStanceTime STANCE phase, even
+        //     mid-swing - fixed by only allowing that bridge on an actual gait-name change
+        //     (the is_actual_gait_change guard below).
+        //  2. More fundamentally, insertModeSequenceTemplate()'s own tiling always RESTARTS
+        //     the template from its own index 0 (e.g. trot's first LF_RH phase) at the
+        //     insertion time, regardless of which phase the gait was actually, continuously
+        //     in at that instant - so even with (1) fixed, every ~3*timeHorizon seconds the
+        //     running gait's phase got silently reset/jumped, felt as a periodic jerk/
+        //     stiffness disrupting an otherwise-steady trot. GaitSchedule::getModeSchedule()
+        //     - the exact method the MPC worker thread's own modifyReferences() already calls
+        //     every solve to extend the schedule ahead of the rolling MPC window - instead
+        //     CONTINUES tiling from the schedule's own existing tail (phase-continuous by
+        //     construction, no reset), which is exactly "keepalive" ought to mean: extend the
+        //     window, don't touch the gait itself. mutex_ (GaitSchedule.h) makes this safe to
+        //     call from this thread even though the MPC thread calls the same method
+        //     concurrently.
+        const scalar_t validUntil = time_s + 4.0 * horizon;
+        gaitSchedule->getModeSchedule(time_s - horizon, validUntil);
+        gait_schedule_valid_until_s_ = validUntil;
+        return true;
+    }
     try {
         const ModeSequenceTemplate gait_template =
             loadModeSequenceTemplate(megadog_legged_interface::getConfigPath("gait.info"), requested, false);
         const scalar_t validUntil = time_s + 4.0 * horizon;
-        interface_->getSwitchedModelReferenceManagerPtr()->getGaitSchedule()->insertModeSequenceTemplate(
-            gait_template, time_s, validUntil);
+        gaitSchedule->insertModeSequenceTemplate(gait_template, time_s, validUntil, is_actual_gait_change);
         active_gait_name_ = requested;
         gait_schedule_valid_until_s_ = validUntil;
     } catch (const std::exception& e) {
@@ -380,8 +407,18 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
         estimatorContactFlag = modeNumber2StanceLeg(safeModeAtTimeOrStance(activeModeSchedule, time_s));
     }
 
+    // When the caller already has a trustworthy absolute base pose (sim
+    // ground truth - see MegadogWbcMeasurement::base_pose_is_ground_truth's
+    // doc comment), use it directly and skip BaseStateEstimator entirely -
+    // this matches ultraDog's ground-truth-only pipeline exactly, which is
+    // proven stable over long trot runs, whereas the estimator's own
+    // leg-odometry dead-reckoning (no ground truth available) was found,
+    // via a rigorous multi-agent investigation, to accumulate a
+    // never-reset, schedule-predicted-contact-gated bias that this repo's
+    // trot instability traced back to. Only fall back to the estimator when
+    // there genuinely is no ground truth (real hardware).
     MegadogWbcMeasurement estimatedMeasurement = measurement;
-    if (base_state_estimator_) {
+    if (!measurement.base_pose_is_ground_truth && base_state_estimator_) {
         BaseStateEstimator::Input estimatorInput;
         estimatorInput.base_euler_zyx_rad = measurement.base_euler_zyx_rad;
         estimatorInput.base_euler_zyx_rate_rad_s = measurement.base_euler_zyx_rate_rad_s;

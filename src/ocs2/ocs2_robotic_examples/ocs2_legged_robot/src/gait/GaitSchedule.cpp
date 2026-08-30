@@ -43,7 +43,9 @@ GaitSchedule::GaitSchedule(ModeSchedule initModeSchedule, ModeSequenceTemplate i
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-void GaitSchedule::insertModeSequenceTemplate(const ModeSequenceTemplate& modeSequenceTemplate, scalar_t startTime, scalar_t finalTime) {
+void GaitSchedule::insertModeSequenceTemplate(const ModeSequenceTemplate& modeSequenceTemplate, scalar_t startTime, scalar_t finalTime,
+                                              bool allowPhaseTransitionStance) {
+  std::lock_guard<std::mutex> lock(mutex_);
   modeSequenceTemplate_ = modeSequenceTemplate;
   auto& eventTimes = modeSchedule_.eventTimes;
   auto& modeSequence = modeSchedule_.modeSequence;
@@ -58,7 +60,7 @@ void GaitSchedule::insertModeSequenceTemplate(const ModeSequenceTemplate& modeSe
   }
 
   // add an intermediate stance phase
-  scalar_t phaseTransitionStanceTime = phaseTransitionStanceTime_;
+  scalar_t phaseTransitionStanceTime = allowPhaseTransitionStance ? phaseTransitionStanceTime_ : 0.0;
   if (!modeSequence.empty() && modeSequence.back() == ModeNumber::STANCE) {
     phaseTransitionStanceTime = 0.0;
   }
@@ -76,6 +78,7 @@ void GaitSchedule::insertModeSequenceTemplate(const ModeSequenceTemplate& modeSe
 /******************************************************************************************************/
 /******************************************************************************************************/
 ModeSchedule GaitSchedule::getModeSchedule(scalar_t lowerBoundTime, scalar_t upperBoundTime) {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto& eventTimes = modeSchedule_.eventTimes;
   auto& modeSequence = modeSchedule_.modeSequence;
   const size_t index = std::lower_bound(eventTimes.begin(), eventTimes.end(), lowerBoundTime) - eventTimes.begin();

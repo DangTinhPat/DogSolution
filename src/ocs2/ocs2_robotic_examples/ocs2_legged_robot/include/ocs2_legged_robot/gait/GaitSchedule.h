@@ -48,7 +48,10 @@ class GaitSchedule {
    *
    * @param [in] modeSchedule: The mode schedule to be used.
    */
-  void setModeSchedule(const ModeSchedule& modeSchedule) { modeSchedule_ = modeSchedule; }
+  void setModeSchedule(const ModeSchedule& modeSchedule) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    modeSchedule_ = modeSchedule;
+  }
 
   /**
    * Gets the mode schedule.
@@ -63,8 +66,33 @@ class GaitSchedule {
    *
    * @param [in] startTime: The initial time from which the new mode sequence template should start.
    * @param [in] finalTime: The final time until when the new mode sequence needs to be defined.
+   * @param [in] allowPhaseTransitionStance: megaDog-specific (default true, matching upstream's
+   * always-bridge behavior). MegadogWbcRuntime calls this not just on an actual gait change but also
+   * periodically (~3*timeHorizon seconds) just to keep the schedule's tiled window from running out,
+   * even when the gait name hasn't changed. Always inserting phaseTransitionStanceTime_'s forced STANCE
+   * bridge on those keepalive refreshes splices a stance phase into an in-progress swing roughly every
+   * 3s with no relation to the gait's own cadence - felt as a periodic, repeating "loss of power"/stumble
+   * during otherwise-normal trot. Pass false on a keepalive refresh (same gait name) so only a genuine
+   * gait change gets the bridge.
    */
-  void insertModeSequenceTemplate(const ModeSequenceTemplate& modeSequenceTemplate, scalar_t startTime, scalar_t finalTime);
+  void insertModeSequenceTemplate(const ModeSequenceTemplate& modeSequenceTemplate, scalar_t startTime, scalar_t finalTime,
+                                  bool allowPhaseTransitionStance = true);
+
+ private:
+  // megaDog-specific: unlike upstream's single-threaded usage, MegadogWbcRuntime
+  // calls into this class from two different OS threads (the MPC worker thread's
+  // advanceMpc()->modifyReferences()->getModeSchedule(), and the real-time
+  // control thread's update()->setGaitTemplateIfNeeded()->insertModeSequenceTemplate())
+  // against the SAME shared GaitSchedule instance - confirmed via a multi-agent
+  // investigation to be a genuine, unguarded data race on modeSchedule_/
+  // modeSequenceTemplate_'s plain std::vectors, capable of producing a torn/
+  // inconsistent read (mismatched eventTimes/modeSequence sizes, or a
+  // mid-assignment modeSequenceTemplate_) that manifests as a sudden,
+  // catastrophic single-tick divergence - this is what megaDog's own
+  // ~15-25s-into-any-gait instability traced back to. This mutex guards every
+  // public entry point below so the two threads can never observe or produce
+  // a torn intermediate state.
+  std::mutex mutex_;
 
  private:
   /**

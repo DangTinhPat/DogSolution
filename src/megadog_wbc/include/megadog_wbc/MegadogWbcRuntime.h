@@ -85,6 +85,19 @@ struct MegadogWbcMeasurement
     std::array<double, 3> base_linear_vel_m_s{};
     std::array<double, 3> base_euler_zyx_rate_rad_s{};
     std::array<double, 3> base_linear_accel_local_m_s2{};
+    // True when base_pos_m/base_linear_vel_m_s above already come from a
+    // trustworthy absolute source (sim ground truth) rather than a
+    // placeholder - see MegadogController's base_fresh/imu_fresh branches.
+    // When true, MegadogWbcRuntime::update() uses base_pos_m/
+    // base_linear_vel_m_s exactly as given, bypassing BaseStateEstimator
+    // entirely (matching ultraDog's ground-truth-only pipeline, proven
+    // stable). When false (no ground truth - real hardware, or sim without
+    // /sim/model_poses bridged), BaseStateEstimator's own leg-odometry
+    // estimate is used instead, and this struct's base_pos_m/
+    // base_linear_vel_m_s are ignored (only base_euler_zyx_rad/
+    // base_euler_zyx_rate_rad_s/base_linear_accel_local_m_s2 - IMU-derived -
+    // matter in that case).
+    bool base_pose_is_ground_truth = false;
 };
 
 class MegadogWbcRuntime

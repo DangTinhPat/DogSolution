@@ -1,11 +1,10 @@
 # ros_gz_bridge topic list for sim.launch.py's parameter_bridge node.
-# No entry here is scoped to the spawned model's own name (robot_name) - the
-# per-foot contact-sensor bridge entries that used to be
-# (model/a1/link/.../sensor/...) were removed; see common/foot_contacts.xacro's
-# git history if that's ever needed again. The world's ground-truth
-# dynamic_pose/info feed was removed too (see MegadogController.cpp's
-# state-estimation comment) - MegadogController no longer reads any
-# ground-truth pose, in sim or otherwise, only /imu/data.
+# Assumes world name "megadog_world" (worlds/megadog_world.sdf) - the
+# dynamic_pose/info path below embeds it, matching babyDog's
+# config/gz_bridge.yaml pattern. No entry here is scoped to the spawned
+# model's own name (robot_name) - the per-foot contact-sensor bridge entries
+# that used to be (model/a1/link/.../sensor/...) were removed; see
+# common/foot_contacts.xacro's git history if that's ever needed again.
 - ros_topic_name: "clock"
   gz_topic_name: "/clock"
   ros_type_name: "rosgraph_msgs/msg/Clock"
@@ -15,5 +14,10 @@
   gz_topic_name: "/imu/sim_raw"
   ros_type_name: "sensor_msgs/msg/Imu"
   gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+- ros_topic_name: "/sim/model_poses"
+  gz_topic_name: "/world/megadog_world/dynamic_pose/info"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
   direction: GZ_TO_ROS
 
