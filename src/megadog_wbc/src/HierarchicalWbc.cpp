@@ -43,6 +43,41 @@ vector_t HierarchicalWbc::update(const vector_t& stateDesired, const vector_t& i
         return WbcBase::updateCmd(x_optimal);
     }
 
+    // A same-session experiment tried moving posture (leg_posture +
+    // haa_posture) OUT of task1 into its own, strictly-lower-priority
+    // null-space-projected level (below both task1 and task2), on the
+    // theory that summing it into task1 as an equally-weighted competitor
+    // of swing/base was what let it fight swing into instability during
+    // trot (5 prior joint-flexibility attempts all failed that way).
+    // Verified via isolated sim: this made things WORSE, not better - the
+    // robot could no longer even complete a stable STAND (tumbled within
+    // ~11.5s of the stand command, before trot was ever attempted).
+    // Root cause understood in hindsight: during STAND, formulateSwingLegTask()
+    // contributes nothing (no leg is swinging), so task1 is JUST base
+    // height/angular - a low-dimensional constraint that leaves a large,
+    // largely UNBOUNDED null-space direction in the 12 leg joints (this is
+    // the exact same drift direction an original, much earlier experiment
+    // found and fixed by giving leg_posture_task_weight a nonzero, WEIGHTED
+    // - not null-space-subordinate - influence: see the long comment
+    // further above about leg_posture_task_weight being non-negotiable).
+    // Weighted summation into task1 gave posture continuous, tunable
+    // authority over that null-space direction regardless of what task1's
+    // OTHER terms wanted; demoting it to strictly-lower-priority gave it
+    // authority only within whatever slack task1's own optimal solution
+    // left over, which for this specific null-space direction turned out
+    // to be far LESS restraining than the old weighted competition, not
+    // more - the opposite of the intended effect. Reverted back to the
+    // original weighted-sum task1 below. The real distinction between
+    // STAND (needs continuous posture authority, weighted-sum works) and
+    // TROT_IN_PLACE (posture fighting the ACTIVELY SWINGING leg's own
+    // task is what destabilizes it) is per-leg/per-contact-mode, not a
+    // single global QP-priority-tier choice - a future fix should
+    // probably scale/disable leg_posture's pull specifically for whichever
+    // leg is currently swinging (where formulateSwingLegTask() already
+    // fully determines that leg's trajectory and posture only adds
+    // friction) while keeping it fully weighted for stance legs (where the
+    // null-space drift risk actually lives) - not attempted here, this is
+    // a real, separate follow-up.
     Task task1 = formulateBaseHeightMotionTask() + formulateBaseAngularMotionTask();
     if (std::isfinite(config_.leg_posture_task_weight) && config_.leg_posture_task_weight > 0.0) {
         task1 = task1 + formulateLegJointPostureTask() * config_.leg_posture_task_weight;

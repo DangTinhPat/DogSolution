@@ -246,9 +246,25 @@ void MegadogWbcRuntime::mpcThreadFunction()
     const auto period = std::chrono::duration<double>(1.0 / mpc_desired_frequency_hz_);
     while (thread_running_) {
         const auto tickStart = std::chrono::steady_clock::now();
+        // Consumed here (MPC thread), never on the control thread - mpc_ is
+        // NOT safe to touch from two threads at once, and this must never
+        // run concurrently with advanceMpc() below. See requestMpcReset()'s
+        // doc comment in MegadogWbcRuntime.h.
+        if (mpc_reset_requested_.exchange(false, std::memory_order_acq_rel)) {
+            try {
+                mpc_->reset();
+            } catch (const std::exception& e) {
+                std::cerr << "[MegadogWbcRuntime] MPC reset failed: " << e.what() << std::endl;
+            }
+        }
         if (mpc_worker_enabled_.load(std::memory_order_relaxed)) {
             try {
                 mrt_->advanceMpc();
+                // Marks "one more real solve has completed" for
+                // requestMpcReset()'s freshness check - only incremented on
+                // an actual completed solve, not every loop iteration, so it
+                // genuinely reflects solves.
+                mpc_advance_count_.fetch_add(1, std::memory_order_release);
             } catch (const std::exception& e) {
                 std::cerr << "[MegadogWbcRuntime] MPC thread error, stopping: " << e.what() << std::endl;
                 thread_running_ = false;
@@ -379,6 +395,49 @@ void MegadogWbcRuntime::setTargetTrajectories(const double time_s, const vector_
     interface_->getReferenceManagerPtr()->setTargetTrajectories(targetTrajectories);
 }
 
+void MegadogWbcRuntime::beginNewLocomotionSegment()
+{
+    mpc_reset_requested_.store(true, std::memory_order_release);
+    mpc_awaiting_fresh_policy_ = true;
+    mpc_reset_request_advance_count_ = mpc_advance_count_.load(std::memory_order_acquire);
+
+    // The actual root cause of the "frozen gait on re-entry" bug (found by
+    // reading setGaitTemplateIfNeeded() after the MPC-reset fix above,
+    // verified NOT to fix it on its own, still didn't help): that function's
+    // very first check - `if (requested == active_gait_name_ && time_s +
+    // horizon < gait_schedule_valid_until_s_) return true;` - short-circuits
+    // to "no refresh needed" whenever the gait NAME hasn't changed, entirely
+    // independent of whether the caller's own local time epoch has just
+    // reset. Re-entering e.g. TROT_IN_PLACE after a STAND hold requests the
+    // SAME gait name as before the hold (setGaitTemplateIfNeeded() is never
+    // even called during a stance-hold command, so active_gait_name_ never
+    // changed away from it) while time_s resets to ~0 - but
+    // gait_schedule_valid_until_s_ still holds its old, large value from
+    // the PRIOR locomotion segment (e.g. ~165s), so `0 + horizon < 165` is
+    // true and the schedule is never touched again. The underlying
+    // GaitSchedule's own eventTimes/modeSequence are therefore still
+    // time-referenced entirely to the old, now-irrelevant epoch;
+    // safeModeAtTimeOrStance() querying the new near-zero time_s against
+    // that stale schedule always lands before its first event and returns
+    // the same single, unchanging mode forever - no swing phase is ever
+    // scheduled, which is exactly why the gait "freezes."
+    //
+    // Clearing active_gait_name_ here forces the NEXT setGaitTemplateIfNeeded()
+    // call to see requested != active_gait_name_ (is_actual_gait_change=true)
+    // even if the requested gait name is unchanged, so it takes the
+    // insertModeSequenceTemplate() path instead of the same-gait "keepalive"
+    // one - that path unconditionally erases the stale schedule from
+    // startTime (~0) onward and retiles fresh (see GaitSchedule.cpp), unlike
+    // getModeSchedule()'s tail-continuation logic, which (verified by
+    // tracing it against a stale multi-hundred-second-old tail) ends up
+    // doing nothing at all when the new window's finalTime is far below the
+    // stale tail's own timestamps. gait_schedule_valid_until_s_ is also
+    // reset to its own class-default (-infinity) so the short-circuit check
+    // itself can't fire on this same stale comparison again.
+    active_gait_name_.clear();
+    gait_schedule_valid_until_s_ = -std::numeric_limits<double>::infinity();
+}
+
 bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rclcpp::Time& ros_time,
                                const MegadogWbcMeasurement& measurement,
                                const MegadogWbcCommand& command, MegadogWbcResult& result)
@@ -403,7 +462,14 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
         if (!setGaitTemplateIfNeeded(command.gait_name, time_s)) {
             return false;
         }
-        const auto& activeModeSchedule = interface_->getReferenceManagerPtr()->getModeSchedule();
+        // Read through GaitSchedule's own mutex-protected snapshot, not
+        // interface_->getReferenceManagerPtr()->getModeSchedule() - that
+        // reads a separate, unguarded ocs2::ReferenceManager buffer that
+        // the MPC thread concurrently mutates via preSolverRun(); this
+        // control-thread query used to race it (see GaitSchedule.h's
+        // mutex_ doc comment for the "inconsistent mode schedule"/tumble
+        // failure this caused).
+        const auto activeModeSchedule = interface_->getSwitchedModelReferenceManagerPtr()->getGaitSchedule()->getCurrentModeSchedule();
         estimatorContactFlag = modeNumber2StanceLeg(safeModeAtTimeOrStance(activeModeSchedule, time_s));
     }
 
@@ -480,7 +546,9 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
         // Gait schedule already ensured up-to-date above (needed earlier for
         // the contact-flag lookup feeding the state estimator).
         setTargetTrajectories(time_s, observation.state, command);
-        const auto& activeModeSchedule = interface_->getReferenceManagerPtr()->getModeSchedule();
+        // Same mutex-protected-snapshot fix as the estimator's contact-flag
+        // query above - see that call site's comment.
+        const auto activeModeSchedule = interface_->getSwitchedModelReferenceManagerPtr()->getGaitSchedule()->getCurrentModeSchedule();
         observation.mode = safeModeAtTimeOrStance(activeModeSchedule, time_s);
 
         try {
@@ -492,6 +560,31 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
         }
         if (!mrt_->initialPolicyReceived()) {
             return false;
+        }
+
+        // See requestMpcReset()'s doc comment: after a reset, the currently
+        // buffered policy may still be the stale one computed before the
+        // reset (the MPC thread needs at least one more advanceMpc() cycle
+        // to replace it) - evaluating that stale policy at the new segment's
+        // near-zero local time would clamp far forward into whatever's left
+        // of its old, no-longer-relevant tail and produce a near-static
+        // result instead of a fresh trot (reproduced 3/3 times in an
+        // isolated stress test). A generation-counter check (not a
+        // timestamp comparison - a first attempt using
+        // policy.timeTrajectory_.front() vs. the new segment's time was
+        // verified WRONG: the stale policy's own front() is an ordinary,
+        // large-looking value from its prior segment's local clock, e.g.
+        // 163.2s, which trivially looks ">= 0" and passed the check
+        // immediately, reproducing the bug 3/3 times). Hold (return false,
+        // caller falls back to its own last-valid-effort) until at least
+        // kMpcResetSettleAdvances real solves have completed since the
+        // reset was requested.
+        if (mpc_awaiting_fresh_policy_) {
+            if (mpc_advance_count_.load(std::memory_order_acquire) <
+                mpc_reset_request_advance_count_ + kMpcResetSettleAdvances) {
+                return false;
+            }
+            mpc_awaiting_fresh_policy_ = false;
         }
 
         try {

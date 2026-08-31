@@ -67,6 +67,39 @@ struct HierarchicalWbcConfig
     double leg_posture_kp = 0.0;
     double leg_posture_kd = 0.0;
     double leg_posture_task_weight = 0.0;
+    // Per-leg scale applied to formulateLegJointPostureTask()'s pull for
+    // whichever leg is currently SWINGING (contactFlag_[leg]==false) -
+    // full weight (1.0) is always used for a leg currently in stance,
+    // regardless of this field. A swinging leg's target ALSO switches to
+    // the dynamic qJointDesired fallback regardless of any configured
+    // nominal (see formulateLegJointPostureTask()), so this reduced weight
+    // reinforces formulateSwingLegTask()'s own trajectory rather than
+    // fighting it - a soft consistency check against singularity-side
+    // disturbance during swing, not a competitor.
+    //
+    // Six same-session sim attempts at a dynamic/bounded posture target
+    // that still pulled on swinging legs at FULL weight (toward a moving
+    // instead of fixed target) all destabilized trot within seconds to
+    // tens of seconds - this field exists to remove that competition.
+    // Zeroing it entirely (fully disabling posture during swing, no
+    // backup at all) was tried first and verified clean through 332s of
+    // TROT_IN_PLACE - but MIT WBIC's real-hardware precedent for "trust
+    // the swing Cartesian task alone" (arXiv:1909.06586, Mini-Cheetah)
+    // assumes a leg Jacobian that stays full-rank through the whole swing
+    // range, which does NOT hold for devq specifically: its
+    // calf_position_max=0.0 sits exactly at a real kinematic singularity
+    // with zero built-in URDF margin (unlike A1/Go1/Aliengo's 37-52.5
+    // degrees - see joint_position_upper_limits_override_rad's doc
+    // comment), so a swing trajectory that's ever disturbed toward that
+    // configuration would have no restoring pull left if this were
+    // exactly 0. Default 0.15 instead mirrors IIT DLS's published
+    // phase-gated postural task (Raiola et al. 2020, Frontiers in
+    // Robotics and AI: Kp_sw/Kd_sw meaningfully reduced from Kp_st/Kd_st,
+    // not zeroed) - small enough to stay well clear of the fighting that
+    // destabilized every full-weight attempt, but nonzero so a knee that
+    // drifts toward the singularity during swing still has *something*
+    // pulling it back rather than nothing.
+    double leg_posture_swing_scale = 0.15;
     // Optional 12-joint target in actuated joint order [LF, LH, RF, RH].
     // Empty means track the MPC joint state as before.
     std::vector<double> leg_posture_nominal_rad;
@@ -93,15 +126,62 @@ struct HierarchicalWbcConfig
     // Optional per-leg [abad, hip, knee] WBC torque limits. Empty means use
     // Pinocchio/URDF effort limits multiplied by torque_limit_scale.
     std::vector<double> leg_torque_limits_nm;
-    // Joint position-limit avoidance (see formulateJointLimitsTask): the QP
-    // bounds each joint's optimized acceleration so that, extrapolated over
-    // this horizon at current position/velocity, it would not cross the
-    // URDF position limit. Not qm_control-derived - added because babyDog's
-    // much shorter legs (vs. qm_control's Aliengo) let the ported swing/base
-    // tasks command joint targets past the real URDF limits, which Gazebo's
-    // physical joint stop then enforces as a hard, jarring collision instead
-    // of the QP itself planning a smooth approach.
+    // Joint position-limit avoidance (see formulateJointLimitsTask): a
+    // relative-degree-2 control barrier function (CBF) on h(q)=limit-q,
+    // enforcing ḧ >= -k2*ḣ - k1*h (i.e. qddot bounded so the QP can never
+    // choose an acceleration that lets the joint reach the limit). Not
+    // qm_control-derived - added because babyDog's much shorter legs (vs.
+    // qm_control's Aliengo) let the ported swing/base tasks command joint
+    // targets past the real URDF limits, which Gazebo's physical joint stop
+    // then enforces as a hard, jarring collision instead of the QP itself
+    // planning a smooth approach.
     double joint_limit_horizon_seconds = 0.15;
+    // k1 in the CBF above is derived from joint_limit_horizon_seconds as
+    // k1=2/horizon^2 (unchanged from the original "reach the limit by time
+    // horizon under constant velocity" intuition). k2 = 2*damping_ratio*
+    // sqrt(k1). The ORIGINAL implementation implicitly used damping_ratio=
+    // 1/sqrt(2)=0.707 (k2=2/horizon) - a genuine bug found this session:
+    // that gives a complex-conjugate pole pair for the h(t) dynamics
+    // (Hurwitz/stable, but NOT "totally negative" - see Kurtz/Wensing/Lin,
+    // arXiv:2109.13349, Theorem 2, on the extra condition an ECBF's gain
+    // matrix needs beyond ordinary stability), so the worst-case h(t) is a
+    // decaying OSCILLATION that can swing past h=0 (i.e. past the actual
+    // position limit) before damping out, rather than approaching it
+    // monotonically - confirmed in sim as a knee joint sustaining a
+    // violation of its configured hard bound for 28+ continuous seconds
+    // during trot (oscillating around/past the limit) despite the
+    // constraint being "hard" in the QP. damping_ratio>=1.0 (real,
+    // non-positive poles - critically damped at exactly 1.0, overdamped
+    // above) is required for the barrier to actually be forward-invariant;
+    // this is clamped to >=1.0 in formulateJointLimitsTask() regardless of
+    // what's configured here, as a hard floor against reintroducing the
+    // bug. Default 1.2 is mildly overdamped for a small safety margin
+    // beyond the critical-damping minimum.
+    double joint_limit_damping_ratio = 1.2;
+    // Optional per-joint TIGHTENING of the bound formulateJointLimitsTask()
+    // enforces, in the same [LF,LH,RF,RH]x[HAA,HFE,KFE] order as
+    // leg_posture_nominal_rad. A finite entry here can only pull that
+    // joint's effective bound INWARD from the real URDF/Pinocchio limit
+    // (never loosen past it - see the WbcBase.cpp constructor, which clamps
+    // each override into [lowerPositionLimit, upperPositionLimit]) - this
+    // is a hard inequality constraint at a QP priority level ABOVE the
+    // swing/posture/base tasks (taskJointLimits, HierarchicalWbc.cpp), so
+    // unlike a posture task's soft target it cannot be out-voted by a
+    // higher-effective-priority task at the same level.
+    //
+    // Exists specifically because real reference robots (A1/Go1/Aliengo -
+    // see qiayuanl/legged_control's own URDFs) all keep 37-52.5 degrees of
+    // built-in URDF margin between their own calf_position_max and the
+    // thigh/calf-collinear singularity, while devq's URDF sets
+    // calf_position_max=0.0 - exactly AT that singularity, zero margin.
+    // formulateJointLimitsTask() enforcing the raw URDF limit therefore
+    // protects nothing on devq's knee; this override lets megaDog restore
+    // the same kind of real, hardware-enforced-style margin real quadruped
+    // URDFs carry, at the QP-constraint level, without touching the actual
+    // URDF/hardware limit itself (which may or may not reflect a genuine
+    // mechanical stop - unconfirmed for devq).
+    std::vector<double> joint_position_upper_limits_override_rad;
+    std::vector<double> joint_position_lower_limits_override_rad;
 };
 
 class WbcBase

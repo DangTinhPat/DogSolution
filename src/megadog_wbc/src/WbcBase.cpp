@@ -66,6 +66,31 @@ WbcBase::WbcBase(const PinocchioInterface& pinocchioInterface, CentroidalModelIn
     // no single-leg-replicated shortcut here.
     jointLowerLimits_ = pinocchioInterfaceMeasured_.getModel().lowerPositionLimit.tail(info_.actuatedDofNum);
     jointUpperLimits_ = pinocchioInterfaceMeasured_.getModel().upperPositionLimit.tail(info_.actuatedDofNum);
+
+    // Optional per-joint tightening of the above (see the doc comment on
+    // joint_position_upper_limits_override_rad/joint_position_lower_
+    // limits_override_rad in WbcBase.h). Each override is clamped into the
+    // real URDF-derived [jointLowerLimits_, jointUpperLimits_] range so a
+    // misconfigured value can only ever tighten, never loosen, the hard
+    // constraint formulateJointLimitsTask() enforces.
+    if (config_.joint_position_upper_limits_override_rad.size() == static_cast<size_t>(info_.actuatedDofNum)) {
+        for (long joint = 0; joint < info_.actuatedDofNum; ++joint) {
+            const double override_value = config_.joint_position_upper_limits_override_rad[static_cast<size_t>(joint)];
+            if (std::isfinite(override_value)) {
+                jointUpperLimits_(joint) = std::clamp(static_cast<scalar_t>(override_value), jointLowerLimits_(joint),
+                                                       jointUpperLimits_(joint));
+            }
+        }
+    }
+    if (config_.joint_position_lower_limits_override_rad.size() == static_cast<size_t>(info_.actuatedDofNum)) {
+        for (long joint = 0; joint < info_.actuatedDofNum; ++joint) {
+            const double override_value = config_.joint_position_lower_limits_override_rad[static_cast<size_t>(joint)];
+            if (std::isfinite(override_value)) {
+                jointLowerLimits_(joint) = std::clamp(static_cast<scalar_t>(override_value), jointLowerLimits_(joint),
+                                                       jointUpperLimits_(joint));
+            }
+        }
+    }
 }
 
 vector_t WbcBase::update(const vector_t& stateDesired, const vector_t& inputDesired, const vector_t& rbdStateMeasured,
@@ -301,7 +326,21 @@ Task WbcBase::formulateLegJointPostureTask()
     const vector_t vJointDesired = vDesired_.tail(info_.actuatedDofNum);
 
     for (size_t joint = 0; joint < info_.actuatedDofNum; ++joint) {
-        const bool useConfiguredNominal = config_.leg_posture_nominal_rad.size() == info_.actuatedDofNum &&
+        const size_t leg = joint / 3;
+        const bool legInStance = leg < contactFlag_.size() && contactFlag_[leg];
+
+        // Per IIT DLS's published phase-gated postural task (Raiola et al.
+        // 2020, Frontiers in Robotics and AI) - the target itself also
+        // switches, not just the weight: a STANCE leg pulls toward the
+        // fixed/banded nominal (the anti-drift/anti-singularity anchor
+        // this task exists for), while a SWINGING leg falls back to
+        // qJointDesired regardless of any configured nominal, so its
+        // (reduced-weight) contribution reinforces formulateSwingLegTask()'s
+        // own trajectory instead of pulling against it - a soft
+        // consistency check for singularity-side disturbance, not a
+        // competitor.
+        const bool useConfiguredNominal = legInStance &&
+                                          config_.leg_posture_nominal_rad.size() == info_.actuatedDofNum &&
                                           std::isfinite(config_.leg_posture_nominal_rad[joint]);
         scalar_t qTarget;
         if (useConfiguredNominal) {
@@ -317,10 +356,21 @@ Task WbcBase::formulateLegJointPostureTask()
         } else {
             qTarget = qJointDesired(static_cast<long>(joint));
         }
-        a(static_cast<long>(joint), static_cast<long>(6 + joint)) = 1.0;
+        // Per-leg contact gating (see leg_posture_swing_scale's doc
+        // comment, WbcBase.h): a swinging leg's row is scaled down (not
+        // necessarily to zero - see that field's default) instead of
+        // pulling at full strength against formulateSwingLegTask().
+        // Scaling both a() and b() by the same factor is equivalent to
+        // Task::operator* applied per-row instead of to the whole task -
+        // the row's contribution to the shared least-squares cost (a^T a)
+        // shrinks with the square of the scale, same as any other task
+        // weight.
+        const scalar_t legScale =
+            legInStance ? 1.0 : static_cast<scalar_t>(std::clamp(config_.leg_posture_swing_scale, 0.0, 1.0));
+        a(static_cast<long>(joint), static_cast<long>(6 + joint)) = legScale;
         b(static_cast<long>(joint)) =
-            config_.leg_posture_kp * (qTarget - qJointMeasured(static_cast<long>(joint))) +
-            config_.leg_posture_kd * (vJointDesired(static_cast<long>(joint)) - vJointMeasured(static_cast<long>(joint)));
+            legScale * (config_.leg_posture_kp * (qTarget - qJointMeasured(static_cast<long>(joint))) +
+                        config_.leg_posture_kd * (vJointDesired(static_cast<long>(joint)) - vJointMeasured(static_cast<long>(joint))));
     }
 
     return {a, b, matrix_t(), vector_t()};
@@ -463,15 +513,19 @@ Task WbcBase::formulateFrictionConeTask()
     return {a, b, d, f};
 }
 
-// Joint position-limit avoidance: bound each joint's optimized acceleration
-// so that extrapolating current position/velocity forward by a fixed
-// horizon would not cross the URDF position limit, i.e. treat the joint as
-// a double integrator and require
-//   q + v*T + 0.5*qddot*T^2 <= q_max   =>   qddot <= 2*(q_max - q - v*T) / T^2
-//   q + v*T + 0.5*qddot*T^2 >= q_min   =>   qddot >= 2*(q_min - q - v*T) / T^2
-// This is the same joint block of the decision vector as the torque-limit
-// task ([0, I, 0] selecting qddot_joint), just bounding acceleration instead
-// of the resulting torque. See HierarchicalWbcConfig::joint_limit_horizon_seconds.
+// Joint position-limit avoidance: a relative-degree-2 control barrier
+// function (CBF) on h(q) = limit - q (safe set h>=0). Requiring
+// ḧ >= -k2*ḣ - k1*h (i.e. qddot bounded accordingly, since ḧ=-qddot and
+// ḣ=-v for the upper bound; signs mirror for the lower bound) makes h=0
+// forward-invariant PROVIDED the (k1,k2) pole pair is real and
+// non-positive - see HierarchicalWbcConfig::joint_limit_damping_ratio's
+// doc comment for why this project's original constant-velocity-
+// extrapolation derivation (q + v*T + 0.5*qddot*T^2 <= q_max, i.e.
+// implicitly damping_ratio=1/sqrt(2)) got that wrong and let a joint
+// oscillate past its own "hard" bound. This is the same joint block of the
+// decision vector as the torque-limit task ([0, I, 0] selecting
+// qddot_joint), just bounding acceleration instead of the resulting
+// torque.
 Task WbcBase::formulateJointLimitsTask()
 {
     matrix_t d(2 * info_.actuatedDofNum, numDecisionVars_);
@@ -485,13 +539,19 @@ Task WbcBase::formulateJointLimitsTask()
         -matrix_t::Identity(info_.actuatedDofNum, info_.actuatedDofNum);
 
     const scalar_t horizon = std::max(config_.joint_limit_horizon_seconds, 1e-3);
-    const scalar_t horizonSq = horizon * horizon;
+    const scalar_t k1 = 2.0 / (horizon * horizon);
+    // Clamp to >=1.0 (real, non-positive poles) regardless of config - see
+    // HierarchicalWbcConfig::joint_limit_damping_ratio's doc comment for
+    // why anything below 1.0 lets the barrier's own worst-case trajectory
+    // oscillate past the limit instead of approaching it monotonically.
+    const scalar_t dampingRatio = std::max(config_.joint_limit_damping_ratio, 1.0);
+    const scalar_t k2 = 2.0 * dampingRatio * std::sqrt(k1);
 
     vector_t qJoint = qMeasured_.tail(info_.actuatedDofNum);
     vector_t vJoint = vMeasured_.tail(info_.actuatedDofNum);
 
-    vector_t qddotMax = (2.0 / horizonSq) * (jointUpperLimits_ - qJoint - vJoint * horizon);
-    vector_t qddotMin = (2.0 / horizonSq) * (jointLowerLimits_ - qJoint - vJoint * horizon);
+    vector_t qddotMax = k1 * (jointUpperLimits_ - qJoint) - k2 * vJoint;
+    vector_t qddotMin = k1 * (jointLowerLimits_ - qJoint) - k2 * vJoint;
 
     f.segment(0, info_.actuatedDofNum) = qddotMax;
     f.segment(info_.actuatedDofNum, info_.actuatedDofNum) = -qddotMin;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace megadog_controller
 {
@@ -173,29 +174,154 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     // stable for 114s, but TROT_IN_PLACE was NOT: KFE breached the intended
     // band within 14s (measured -0.817, past the -0.87275 edge) and by
     // ~184s in, KFE hit exactly 0.0 - the singularity itself - causing a
-    // full tumble (roll spiked to 1.31 rad, torque saturated). Root cause:
-    // the band only bounds the *target* fed into leg_posture's soft,
-    // weighted QP task (weight 22) - it does not hard-clamp the actual
-    // solved joint position. During trot, the higher-effective-priority
-    // swing/stance tasks pulled the real KFE trajectory well past the
-    // clamped target, so the "safety net" only bounds what leg_posture asks
-    // for, not what the robot actually does - it never had a hard guarantee
-    // to begin with. The old fixed-nominal pin (below) worked precisely
-    // because it exerts a CONSTANT pull-back throughout the whole gait
-    // cycle rather than one that can itself track further from home; a
-    // clamped-but-moving target gives swing/stance more room to drag the
-    // real joint along with it. Fully reverted - do not re-attempt a
-    // dynamic/bounded KFE (or HFE, not independently isolated in that test
-    // either) target via this soft-task mechanism. A genuinely safe
-    // flexible KFE/HFE would need a hard inequality constraint in the QP
-    // (like formulateJointLimitsTask()'s approach) instead of another
-    // weighted cost - a materially bigger change, not attempted here.
-    // haa_posture's own band (above) is NOT implicated by this failure and
-    // stays enabled - it was independently verified safe across 350s of
-    // STAND+TROT_IN_PLACE with leg_posture fully pinned exactly as it is
-    // again now.
+    // full tumble (roll spiked to 1.31 rad, torque saturated). Root cause
+    // (confirmed by research this session comparing against upstream
+    // qiayuanl/legged_control and real A1/Go1/Aliengo URDFs): the band only
+    // bounds the *target* fed into leg_posture's soft, weighted QP task
+    // (weight 22, same priority level as swing/base) - it does not
+    // hard-clamp the actual solved joint position, so swing/stance dragged
+    // the real KFE trajectory well past the clamped target.
+    //
+    // A SECOND attempt re-enabled this band, now backed by a genuine hard
+    // safety net the first attempt didn't have:
+    // joint_position_upper_limits_override_rad (below) tightens
+    // taskJointLimits - a QP priority level ABOVE task1's swing/posture
+    // competition, so it can't be out-voted the way leg_posture's own soft
+    // clamp was - to KFE<=-0.80. This also failed: clean through t~200s
+    // (past the first attempt's ~184s failure point), then a warning
+    // appeared in the log ("inconsistent mode schedule: eventTimes=16
+    // modeSequence=17, falling back to STANCE") immediately followed by a
+    // torque spike (15-29 Nm vs. the normal ~3-5 Nm) and a full tumble -
+    // and during that tumble, KFE_meas AND KFE_mpc (the QP's own commanded
+    // target) both measured above -0.80, i.e. the hard constraint itself
+    // was violated in practice, then KFE hit exactly 0.0 again. Lesson: a
+    // hard QP inequality constrains the *commanded* acceleration each
+    // solve tick, not a guarantee on the *actual physical* joint position
+    // once the robot is already destabilizing (torque saturating, high
+    // angular rates) - it's necessary but evidently not sufficient once
+    // something else has already knocked the robot off balance. The
+    // "inconsistent mode schedule" warning was traced to its actual root
+    // cause and fixed: MegadogWbcRuntime::update() was reading the current
+    // gait mode through ocs2::ReferenceManager's own unguarded
+    // BufferedValue<ModeSchedule> (a SEPARATE object from GaitSchedule's
+    // already-mutex-protected one) from the control thread, while the MPC
+    // thread concurrently mutated that same buffer via preSolverRun() - the
+    // exact same cross-thread pattern the GaitSchedule mutex above was
+    // built to prevent, just on a different, previously-missed object (see
+    // GaitSchedule.h's mutex_ doc comment for the full story). Fixed via
+    // GaitSchedule::getCurrentModeSchedule() + switching both of
+    // MegadogWbcRuntime.cpp's per-tick mode queries to read through it.
+    // Verified via isolated sim: the warning did not occur once across
+    // 359s of continuous TROT_IN_PLACE (vs. reliably by ~184-226s before),
+    // and the robot stayed fully stable throughout - strong evidence this,
+    // not the joint-band mechanism itself, was the actual trigger behind
+    // both prior tumbles.
+    //
+    // A THIRD attempt re-enabled this band with the race fixed AND the hard
+    // KFE<=-0.80 constraint in place - and STILL failed: clean (and no
+    // "inconsistent mode schedule" warning at all this time, confirming the
+    // race fix holds) until ~t=232s into TROT_IN_PLACE, when RF leg's
+    // KFE_meas AND KFE_mpc both sustained well above -0.80 (oscillating
+    // -0.71..-0.78) for 28+ continuous seconds before the run was stopped
+    // (per the monitoring protocol, before it could cascade into a full
+    // tumble like attempt 2's). So the race was never the only problem:
+    // the "hard" QP inequality in formulateJointLimitsTask() itself does
+    // not actually bound the real trajectory here. Most likely explanation
+    // not yet confirmed: it's a horizon-extrapolated (not exact) bound -
+    // qddotMax = (2/horizon^2)*(jointUpperLimits_ - qJoint - vJoint*horizon)
+    // assumes ~constant velocity over joint_limit_horizon_seconds=0.15s.
+    // Root cause now actually found and fixed (not just hypothesized):
+    // formulateJointLimitsTask()'s constraint is algebraically a
+    // relative-degree-2 control barrier function (CBF) on h=limit-q, and
+    // the original derivation's implicit gain pair gave h(t) a pair of
+    // COMPLEX-conjugate poles (Hurwitz/stable, but not "totally negative" -
+    // research this session cites Kurtz/Wensing/Lin arXiv:2109.13349's
+    // ECBF gain condition) - i.e. the barrier's own worst-case trajectory
+    // is a decaying OSCILLATION that can swing past the limit before
+    // damping out, exactly matching the observed "oscillating -0.71..-0.78
+    // for 28+ seconds" symptom. Fixed via
+    // HierarchicalWbcConfig::joint_limit_damping_ratio (WbcBase.h/.cpp),
+    // clamped to >=1.0 (real poles) - see that field's doc comment for the
+    // full derivation.
+    //
+    // A FOURTH attempt re-enabled this band with the CBF gain fix above -
+    // and failed WORSE and FASTER than all three prior attempts: a full
+    // base-orientation tumble (roll/pitch/yaw all diverging, base height
+    // collapsing) within ~34s of TROT_IN_PLACE, vs. the ~184-232s the
+    // earlier attempts survived. Critically, this failure's signature is
+    // DIFFERENT from attempts 2/3's: KFE_mpc (the MPC's own commanded
+    // target, not just the WBC's tracking of it) diverged along with
+    // KFE_meas, and the WHOLE base orientation diverged within under 2s -
+    // this looks like a genuine MPC/whole-body balance failure, not a
+    // localized joint-limit-barrier oscillation. Suspected cause (not yet
+    // confirmed): formulateJointLimitsTask() runs for ALL 12 joints, ALL
+    // the time, not just KFE when an override is set - the damping_ratio
+    // fix increased k2 (the velocity-damping gain) by roughly 70% network-
+    // wide (from the old buggy implicit ratio 1/sqrt(2)=0.707 to the new
+    // floor of 1.0), which could be throttling qddot more aggressively
+    // than before during ordinary fast trot swings even far from any
+    // actual position limit (the -k2*v term matters whenever velocity is
+    // high, not just near a limit) - possibly fighting the swing task
+    // hard enough to destabilize balance. This is a real, separate
+    // regression risk introduced by the CBF fix itself when combined with
+    // dynamic swing motion, not proof the fix's math is wrong. The
+    // damping_ratio fix was since independently isolated (leg_posture
+    // pinned, no KFE override) and verified safe alone across ~296s of
+    // TROT_IN_PLACE - so it's not itself the destabilizer.
+    //
+    // A FIFTH attempt narrowed the experiment to HFE ALONE - KFE's band
+    // entry left at 0 (exactly pinned, matching the always-proven-safe
+    // fixed target), no KFE override set, so the joint every prior failure
+    // involved was completely untouched. This STILL failed, and faster and
+    // harder than every prior attempt: full tumble within ~10-14s of
+    // TROT_IN_PLACE (vs. attempt 4's ~34s, the previous fastest), with
+    // KFE_meas staying tight near its pinned nominal right up until the
+    // tumble was already underway - i.e. KFE only diverged as a
+    // CONSEQUENCE of the base losing balance, not a cause. This is
+    // decisive: across 5 independent attempts (HFE+KFE together x4,
+    // HFE-alone x1), EVERY dynamically-bounded leg_posture band has
+    // destabilized trot within seconds to tens of seconds, including one
+    // (HFE) with zero kinematic-singularity risk. The common factor across
+    // all 5 is not KFE's singularity - it's leg_posture itself being a
+    // SOFT, weighted QP task (weight 22) at the SAME priority tier as
+    // swing/base (task1, HierarchicalWbc.cpp), competing rather than
+    // being subordinate to them; a moving target at that tier apparently
+    // lets swing/stance and the posture pull fight each other into
+    // instability once real trot dynamics (not just STAND) are involved,
+    // regardless of which joint or how carefully its target/gains are
+    // chosen.
+    //
+    // A SIXTH attempt tried an architectural fix instead of another
+    // tuning pass: moving posture to its own QP priority level strictly
+    // below task1/task2 (null-space-projected, HierarchicalWbc.cpp) so it
+    // could never compete with swing/base. This made things WORSE than
+    // all 5 prior attempts - the robot couldn't even complete a stable
+    // STAND (tumbled ~11.5s after the stand command, before trot was ever
+    // reached). Root cause: during STAND, formulateSwingLegTask()
+    // contributes nothing, so task1 alone leaves a large, largely
+    // UNBOUNDED null-space direction in the 12 leg joints - the exact
+    // drift direction leg_posture_task_weight was originally added to
+    // fix (see the long comment above), which needs CONTINUOUS, WEIGHTED
+    // authority to counter, not merely "whatever's left over after task1
+    // is satisfied" (task1's own optimal solution doesn't care about that
+    // direction at all, so the leftover slack there turned out to be far
+    // LESS restraining than the old weighted competition, not more).
+    // Reverted (HierarchicalWbc.cpp back to the original weighted-sum
+    // task1). The real fix for TROT_IN_PLACE's failure mode likely needs
+    // per-leg/per-contact-mode posture scaling (full weight for a stance
+    // leg, near-zero for a leg that's actively swinging, where
+    // formulateSwingLegTask() already fully determines its trajectory and
+    // posture only adds friction) rather than a single global QP-tier
+    // choice - a real, substantial follow-up, not attempted here.
+    // leg_posture stays fully pinned (matches the config validated clean
+    // multiple times this session).
     config.leg_posture_dynamic_band_rad.clear();
     config.leg_torque_limits_nm = {80.0, 80.0, 80.0};
+    // No KFE override - KFE is fully pinned above, doesn't need it. The
+    // override mechanism itself (joint_position_upper_limits_override_rad)
+    // stays available in WbcBase.h/.cpp for when leg_posture's band is
+    // next revisited.
+    config.joint_position_upper_limits_override_rad.clear();
     // Keeping qm_control's 10 s WBC warm-up here leaves STAND/TROT running
     // without base height/angular or swing-leg tasks for several seconds
     // after handoff, so the optimizer can settle into visually
@@ -670,6 +796,20 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         if (isLocomotionState(fsm_state) && !isLocomotionState(previous_fsm_state)) {
             locomotion_runtime_epoch_wbc_time_s_ =
                 std::max(state_entered_wbc_time_s_, standup_start_latched_ ? kStandupDurationS : 0.0);
+            // The upcoming locomotion segment's local clock (runtime_time_s
+            // below) restarts at/near 0 here, but neither the MPC solver's
+            // own internal warm-start state nor the WBC runtime's gait-
+            // schedule validity bookkeeping reset on their own - found via
+            // stress-testing this session (re-entering a locomotion state
+            // after a STAND hold, which suspends the MPC worker, froze the
+            // gait into a near-static pose, reproduced 3/3 times) and fixed
+            // only after two attempts, once the actual root cause (a stale
+            // gait-schedule validity window, not just the MPC solver) was
+            // found. See MegadogWbcRuntime::beginNewLocomotionSegment()'s
+            // doc comment for the full story.
+            if (runtime_) {
+                runtime_->beginNewLocomotionSegment();
+            }
         }
     }
 

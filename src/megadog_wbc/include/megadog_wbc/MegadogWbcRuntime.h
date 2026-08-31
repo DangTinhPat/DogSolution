@@ -122,6 +122,35 @@ public:
     bool update(double time_s, double dt_s, const rclcpp::Time& ros_time, const MegadogWbcMeasurement& measurement,
                 const MegadogWbcCommand& command, MegadogWbcResult& result);
 
+    // Call when the caller (MegadogController) is about to start a fresh
+    // locomotion segment (e.g. re-entering TROT_IN_PLACE after a STAND
+    // hold) - see MegadogWbcRuntime.cpp's implementation and update()/
+    // mpcThreadFunction() for the full story of the "frozen gait on
+    // re-entry" bug this exists to fix (found via stress-testing, took two
+    // failed fix attempts before the actual root cause - a stale
+    // GaitSchedule validity window, not just the MPC solver's warm-start -
+    // was found by reading setGaitTemplateIfNeeded() rather than guessing
+    // again). Does two things, both safe to call from the caller's own
+    // (control) thread:
+    //  1. Requests an MPC solver reset - lightweight, thread-safe: only
+    //     sets an atomic flag that the MPC thread itself picks up and acts
+    //     on at the start of its own next loop iteration (see
+    //     mpcThreadFunction()) - the actual solver reset (mpc_->reset(),
+    //     NOT thread-safe on its own) never runs concurrently with
+    //     advanceMpc(). update() then holds (returns false, caller falls
+    //     back to its own last-valid-effort) until a policy computed via a
+    //     solve that ran AFTER this call is confirmed via generation
+    //     counter (not a raw timestamp comparison - see
+    //     mpc_advance_count_'s doc comment for why that didn't work).
+    //  2. Clears active_gait_name_/resets gait_schedule_valid_until_s_ -
+    //     both control-thread-only state, no synchronization needed -
+    //     forcing the next setGaitTemplateIfNeeded() call to fully retile
+    //     the gait schedule from the new segment's time_s even if the
+    //     requested gait name happens to be unchanged from before the
+    //     hold, instead of short-circuiting on a validity window left over
+    //     from the old, now-irrelevant epoch.
+    void beginNewLocomotionSegment();
+
 private:
     void mpcThreadFunction();
     bool setGaitTemplateIfNeeded(const std::string& gait_name, double time_s);
@@ -152,6 +181,35 @@ private:
     std::thread mpc_thread_;
     std::atomic<bool> thread_running_{false};
     std::atomic<bool> mpc_worker_enabled_{false};
+    // See requestMpcReset()'s doc comment.
+    //
+    // A first version of this "is the policy fresh after a reset" check
+    // compared policy.timeTrajectory_.front() against the reset's target
+    // time_s directly and was WRONG - verified by isolated sim to still
+    // reproduce the frozen-gait bug 3/3 times. Reason: the STALE policy's
+    // own front() is a large, perfectly ordinary-looking value from its own
+    // (now-irrelevant) prior locomotion segment's local clock (e.g. 163.2s,
+    // if that segment ran that long before STAND suspended the MPC worker)
+    // - segment-local time values aren't comparable across a reset the way
+    // a raw "old vs new" comparison assumes, so "front() >= reset_time(0.0)"
+    // was true for the STALE policy too, defeating the check on its very
+    // first evaluation.
+    //
+    // Fixed with a generation counter instead of a time-value comparison:
+    // mpc_advance_count_ increments (MPC thread only, after each completed
+    // advanceMpc()) every solve cycle. requestMpcReset() (control thread)
+    // records the count AT THE MOMENT of the request. update() then holds
+    // until the count has advanced by at least kMpcResetSettleAdvances
+    // cycles past that recorded value - i.e. until a solve has actually run
+    // AFTER the reset was issued (not merely until some timestamp looks
+    // numerically plausible) - with a small margin so the buffered result
+    // has had a control tick to be swapped in via updatePolicy() before
+    // being trusted.
+    std::atomic<bool> mpc_reset_requested_{false};
+    std::atomic<uint64_t> mpc_advance_count_{0};
+    bool mpc_awaiting_fresh_policy_ = false;
+    uint64_t mpc_reset_request_advance_count_ = 0;
+    static constexpr uint64_t kMpcResetSettleAdvances = 2;
     bool ready_ = false;
     double mpc_desired_frequency_hz_ = 100.0;
     std::string active_gait_name_ = "stance";

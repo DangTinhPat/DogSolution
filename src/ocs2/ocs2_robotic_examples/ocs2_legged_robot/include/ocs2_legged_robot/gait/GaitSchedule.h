@@ -62,6 +62,20 @@ class GaitSchedule {
   ModeSchedule getModeSchedule(scalar_t lowerBoundTime, scalar_t upperBoundTime);
 
   /**
+   * megaDog-specific: a pure read-only snapshot of the currently stored mode schedule, safe to call
+   * from any thread against the SAME instance getModeSchedule()/setModeSchedule()/
+   * insertModeSequenceTemplate() are being called on from other threads (see mutex_'s doc comment).
+   * Unlike getModeSchedule(scalar_t, scalar_t), this never re-tiles or otherwise mutates
+   * modeSchedule_/modeSequenceTemplate_ - it just copies out the current state under the lock. Use
+   * this for a cheap, frequent "what mode is active at time t" point query (e.g. every real-time
+   * control tick); use the mutating overload only for the periodic gait-schedule-window refresh.
+   */
+  ModeSchedule getCurrentModeSchedule() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return modeSchedule_;
+  }
+
+  /**
    * Used to insert a new user defined logic in the given time period.
    *
    * @param [in] startTime: The initial time from which the new mode sequence template should start.
@@ -92,7 +106,28 @@ class GaitSchedule {
   // ~15-25s-into-any-gait instability traced back to. This mutex guards every
   // public entry point below so the two threads can never observe or produce
   // a torn intermediate state.
-  std::mutex mutex_;
+  //
+  // A SIBLING race was found later, same session: MegadogWbcRuntime::update()
+  // (control thread) used to call interface_->getReferenceManagerPtr()->
+  // getModeSchedule() for its own "what mode is active right now" point
+  // queries - a completely SEPARATE ModeSchedule (ocs2::ReferenceManager's
+  // own BufferedValue<ModeSchedule> modeSchedule_), not this class's. That
+  // buffer's active value is documented (BufferedValue.h) as unsafe to
+  // read via get() concurrently with updateFromBuffer() - and
+  // ReferenceManager::preSolverRun() calls updateFromBuffer() on it from
+  // inside advanceMpc(), i.e. from the MPC worker thread, while update()'s
+  // get() ran on the control thread: the exact same cross-thread pattern
+  // this mutex was built to prevent, just on a different object. Symptom:
+  // an intermittent "inconsistent mode schedule: eventTimes=N
+  // modeSequence=N+2" warning (torn read of the two vectors mid
+  // move-assignment) immediately followed by a torque spike and a full
+  // tumble - reproduced in sim during an unrelated WBC-tuning experiment.
+  // Fixed by adding getCurrentModeSchedule() above and switching
+  // MegadogWbcRuntime's two per-tick queries to read through THIS
+  // instance's mutex instead of ReferenceManager's unguarded buffer -
+  // SwitchedModelReferenceManager::setModeSchedule() already keeps both
+  // copies in sync, so this instance always has the same data, just safely.
+  mutable std::mutex mutex_;
 
  private:
   /**
