@@ -196,16 +196,25 @@ initialState
    ;; Leg Joint Positions: [LF, LH, RF, RH] - must match reference.info's
    ;; defaultJointState; this block was stale at A1's old numbers (KFE=-1.44
    ;; even fell outside devq's real calf position limit [0.436,2.705]) ;;
-   (12,0) -0.30       ; LF_HAA
+   ;; HAA bumped 0.30->0.40 rad: urdf-expert FK analysis found devq's fixed
+   ;; hip lateral offset is a much larger fraction of its 25%-shorter legs
+   ;; than A1's, so devq's stance looks ~3x more "splayed" than A1's at
+   ;; matching HAA angles (0.30 rad was already narrower than A1's own 0.20
+   ;; would give on devq's geometry - lowering it further would WIDEN the
+   ;; stance, not narrow it). Increasing HAA magnitude is the only lever
+   ;; that narrows devq's stance; 0.40 keeps ~2.5cm clearance to the trunk's
+   ;; lateral envelope (0.45 is the practical ceiling, 0.50 is a hard edge
+   ;; where the foot lands exactly on the trunk edge - do not go there).
+   (12,0) -0.40       ; LF_HAA
    (13,0)  0.574027   ; LF_HFE
    (14,0) -1.37275    ; LF_KFE
-   (15,0) -0.30       ; LH_HAA
+   (15,0) -0.40       ; LH_HAA
    (16,0)  0.574027   ; LH_HFE
    (17,0) -1.37275    ; LH_KFE
-   (18,0)  0.30       ; RF_HAA
+   (18,0)  0.40       ; RF_HAA
    (19,0)  0.574027   ; RF_HFE
    (20,0) -1.37275    ; RF_KFE
-   (21,0)  0.30       ; RH_HAA
+   (21,0)  0.40       ; RH_HAA
    (22,0)  0.574027   ; RH_HFE
    (23,0) -1.37275    ; RH_KFE
 }

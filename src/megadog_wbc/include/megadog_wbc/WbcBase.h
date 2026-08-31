@@ -50,6 +50,16 @@ struct HierarchicalWbcConfig
     // Optional [LF, LH, RF, RH] HAA targets in actuated joint order. Empty
     // means track the MPC joint state as before.
     std::vector<double> haa_posture_nominal_rad;
+    // When haa_posture_nominal_rad is set AND this is > 0, the task doesn't
+    // pin the joint to the nominal angle exactly - it clamps the dynamic
+    // qJointDesired target to [nominal - band, nominal + band] instead. This
+    // gives the same kind of natural, swing-responsive hip motion as an
+    // empty nominal (fully dynamic tracking), but keeps a bounded anchor so
+    // the joint can never drift arbitrarily far from a known-safe angle
+    // (see formulateHaaJointPostureTask). 0.0 (default) preserves the old
+    // binary behavior: fully pinned when nominal is set, fully dynamic when
+    // it's empty.
+    double haa_posture_dynamic_band_rad = 0.0;
     // Soft posture regularization for the full 12-joint leg shape. This is
     // useful for robots whose nominal hip/knee signs differ from the A1
     // source project: stance/swing/base tasks can otherwise find a dynamically
@@ -60,6 +70,21 @@ struct HierarchicalWbcConfig
     // Optional 12-joint target in actuated joint order [LF, LH, RF, RH].
     // Empty means track the MPC joint state as before.
     std::vector<double> leg_posture_nominal_rad;
+    // Optional 12-joint per-joint band, same semantics and same
+    // [LF,LH,RF,RH]x[HAA,HFE,KFE] order as leg_posture_nominal_rad (see
+    // haa_posture_dynamic_band_rad above for the shared mechanism this
+    // mirrors). For a joint whose entry is > 0 (and leg_posture_nominal_rad
+    // has a finite value at that index), the target is
+    // clamp(qJointDesired, nominal-band, nominal+band) instead of pinned
+    // exactly to nominal - natural, swing-responsive motion bounded around
+    // a known-safe angle. A joint's entry being 0/absent keeps that one
+    // joint's old exact-pin behavior. This is deliberately per-joint rather
+    // than a single scalar: devq's KFE sits close to calf_position_max=0.0
+    // (a real kinematic singularity - see the long makeDevqWbcConfig()
+    // comment in MegadogController.cpp) and needs a tight band, while HFE
+    // has generous physical margin on both sides and can safely take a
+    // wider one.
+    std::vector<double> leg_posture_dynamic_band_rad;
     // qm_control keeps the dog motor-facing WBC output disabled for the first
     // 10 s and uses a lighter WBC hierarchy during that window. StateTrot can
     // shorten this in simulation, but the default mirrors the reference.

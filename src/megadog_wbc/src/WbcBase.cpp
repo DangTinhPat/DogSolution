@@ -263,9 +263,21 @@ Task WbcBase::formulateHaaJointPostureTask()
     for (size_t joint = 0; joint < info_.actuatedDofNum; joint += 3) {
         const bool useConfiguredNominal = config_.haa_posture_nominal_rad.size() == numHaaJoints &&
                                           std::isfinite(config_.haa_posture_nominal_rad[row]);
-        const scalar_t qTarget = useConfiguredNominal
-            ? static_cast<scalar_t>(config_.haa_posture_nominal_rad[row])
-            : qJointDesired(static_cast<long>(joint));
+        scalar_t qTarget;
+        if (useConfiguredNominal) {
+            const scalar_t nominal = static_cast<scalar_t>(config_.haa_posture_nominal_rad[row]);
+            if (config_.haa_posture_dynamic_band_rad > 0.0) {
+                // Bounded-dynamic: follow the swing/stance planner's own
+                // intent, but never further than the band from the known-
+                // safe nominal - see the field's doc comment in WbcBase.h.
+                const scalar_t band = static_cast<scalar_t>(config_.haa_posture_dynamic_band_rad);
+                qTarget = std::clamp(qJointDesired(static_cast<long>(joint)), nominal - band, nominal + band);
+            } else {
+                qTarget = nominal;
+            }
+        } else {
+            qTarget = qJointDesired(static_cast<long>(joint));
+        }
         a(static_cast<long>(row), static_cast<long>(6 + joint)) = 1.0;
         b(static_cast<long>(row)) =
             config_.haa_posture_kp * (qTarget - qJointMeasured(static_cast<long>(joint))) +
@@ -291,9 +303,20 @@ Task WbcBase::formulateLegJointPostureTask()
     for (size_t joint = 0; joint < info_.actuatedDofNum; ++joint) {
         const bool useConfiguredNominal = config_.leg_posture_nominal_rad.size() == info_.actuatedDofNum &&
                                           std::isfinite(config_.leg_posture_nominal_rad[joint]);
-        const scalar_t qTarget = useConfiguredNominal
-            ? static_cast<scalar_t>(config_.leg_posture_nominal_rad[joint])
-            : qJointDesired(static_cast<long>(joint));
+        scalar_t qTarget;
+        if (useConfiguredNominal) {
+            const scalar_t nominal = static_cast<scalar_t>(config_.leg_posture_nominal_rad[joint]);
+            const bool hasBand = config_.leg_posture_dynamic_band_rad.size() == info_.actuatedDofNum &&
+                                  config_.leg_posture_dynamic_band_rad[joint] > 0.0;
+            if (hasBand) {
+                const scalar_t band = static_cast<scalar_t>(config_.leg_posture_dynamic_band_rad[joint]);
+                qTarget = std::clamp(qJointDesired(static_cast<long>(joint)), nominal - band, nominal + band);
+            } else {
+                qTarget = nominal;
+            }
+        } else {
+            qTarget = qJointDesired(static_cast<long>(joint));
+        }
         a(static_cast<long>(joint), static_cast<long>(6 + joint)) = 1.0;
         b(static_cast<long>(joint)) =
             config_.leg_posture_kp * (qTarget - qJointMeasured(static_cast<long>(joint))) +

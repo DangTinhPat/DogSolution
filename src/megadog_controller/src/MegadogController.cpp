@@ -49,11 +49,20 @@ constexpr double kWbcHfePostureKp = 0.0;
 constexpr double kWbcKfePostureKp = 0.0;
 constexpr double kDiagnosticsPeriodS = 2.0;
 
+// HAA bumped 0.30->0.40 rad to narrow devq's visibly "splayed" stance - see
+// the matching note in task.info/reference.info (must stay in sync with
+// both). Counter-intuitively this NARROWS the stance rather than widening
+// it: urdf-expert's FK analysis found devq's fixed hip lateral offset is a
+// much larger fraction of its 25%-shorter legs than A1's, so *increasing*
+// HAA magnitude is what pulls the foot back under the body here. 0.40 keeps
+// ~2.5cm clearance to the trunk's lateral envelope (0.45 is the practical
+// ceiling, 0.50 is a hard edge - do not go there without re-deriving the FK
+// margin for devq's actual geometry first).
 constexpr std::array<double, 12> kStandingJointTargetRad{
-    -0.30, 0.574027, -1.37275,
-    -0.30, 0.574027, -1.37275,
-     0.30, 0.574027, -1.37275,
-     0.30, 0.574027, -1.37275,
+    -0.40, 0.574027, -1.37275,
+    -0.40, 0.574027, -1.37275,
+     0.40, 0.574027, -1.37275,
+     0.40, 0.574027, -1.37275,
 };
 
 bool isHaaJointIndex(const std::size_t joint_index)
@@ -83,46 +92,31 @@ double clampJointTorque(const std::size_t joint_index, const double torque)
 // compute a *desired acceleration* (b = accDesired + kp*posError + kd*velError)
 // that WbcBase's QP then maps to torque through Pinocchio's real mass matrix
 // - so unlike kJointKd above, these do NOT need mass scaling (the QP
-// already uses devq's real, ported mass/inertia). What they DO need is
-// length scaling: kp/kd here set a closed-loop natural frequency
-// (omega_n = sqrt(kp), independent of mass - same as a pendulum's period,
-// which famously doesn't depend on the bob's mass, only its length). devq's
-// shorter legs (0.15 vs A1's 0.2, length_ratio=0.75) have inherently faster
-// natural dynamics, so the gains scale UP to keep pace:
-//   kp_new = kp_old / length_ratio        (= kp_old * 1.3333)
-//   kd_new = kd_old / sqrt(length_ratio)  (= kd_old * 1.1547, preserves the
-//                                           same damping ratio zeta)
-// WbcBase.h's own defaults (350/37/400/140/400/100/400/140) are qm_control's
-// Aliengo-scale starting point, left as the library's generic baseline -
-// megaDog's devq-scaled profile is built explicitly here instead.
+// already uses devq's real, ported mass/inertia).
 //
-// (A same-session experiment tried matching ultraDog's own unmodified
-// `HierarchicalWbcConfig{}` exactly instead - on the theory that these gains
-// shouldn't need devq-specific scaling at all, since upstream A1/Go1/Aliengo
-// configs don't scale them either. That is only half right: swing_kp/kd and
-// base_angular_kp/kd genuinely don't need it (matching ultraDog there caused
-// no regression). But leg_posture_task_weight=0 - ultraDog/library's default,
-// posture task disabled - is NOT safe for devq specifically: with all 4 feet
-// planted, formulateNoContactMotionTask()'s per-leg foot-Jacobian equality
-// constrains the *combination* of joint accelerations needed to hold the
-// foot still, but leaves the leg's internal (HFE,KFE) null-space direction
-// completely free; with the posture task disabled nothing pulls that
-// direction back toward task.info's nominal joint targets, so it drifts -
-// slowly at first (an observed ~0.22->0.30m base-height creep during plain
-// STAND), then catastrophically once a leg's HFE/KFE drifts far enough to
-// approach devq's calf_position_max=0.0 kinematic singularity, at which
-// point the foot Jacobian loses rank. devq's shorter legs (thigh=calf=
-// 0.15m, vs. real A1's longer legs) sit closer to this singularity at the
-// nominal standing joint fraction-of-range than ultraDog's A1 does, which is
-// the likely reason ultraDog can run this task disabled safely while megaDog
-// cannot - a genuine physical difference, not an arbitrary tuning choice.
-// Re-enabling leg_posture (below) alone, on top of ultraDog's swing_kp/kd,
-// was tried and made trot fail FASTER (~6-8s in, vs. the disabled-posture
-// version's ~10-20s creep-then-fall) - the two are evidently tuned as a
-// pair, not independently swappable, so this reverts to the original
-// devq-scaled swing/base_angular values leg_posture=65/10/22 was actually
-// validated alongside, rather than mixing a validated posture gain with an
-// unvalidated swing gain.)
+// (A same-session experiment tried making haa_posture/leg_posture track a
+// *dynamic* target (empty nominal_rad, falls back to qJointDesired each
+// tick in formulateHaaJointPostureTask()/formulateLegJointPostureTask(),
+// WbcBase.cpp) instead of the fixed standing-pose angles below, aiming for
+// a less "robotic" hip swing like ultraDog's own HierarchicalWbcConfig{}
+// defaults. Doing this for BOTH tasks at once, plus raising swing_kp/kd/
+// base_angular_kp/kd to ultraDog's values, made TROT_IN_PLACE fall over
+// within ~8-10s in sim (leg_posture's fixed nominal turned out to be the
+// only thing anchoring the (HFE,KFE) null-space away from devq's
+// calf_position_max=0.0 singularity - losing it removed that protection).
+// A narrower follow-up tried the dynamic target on HAA alone (no
+// kinematic-singularity risk there), with leg_posture/swing/base gains
+// left untouched, and knocked haa_posture_kp/kd/weight down from
+// 120/20/80 to 90/15/30 - this passed 104s of isolated headless-sim
+// TROT_IN_PLACE with no instability by every logged metric (eom residual,
+// roll/pitch/yaw, torque, joint limits). It still looked worse in the
+// user's own live testing than the original fixed-nominal behavior below -
+// a real discrepancy between what this session's sim metrics can see and
+// what actually looks natural, not something to dismiss. Fully reverted;
+// do not re-attempt a dynamic haa_posture/leg_posture target without a
+// genuinely different mechanism, and don't trust headless sim metrics
+// alone as sufficient evidence for this specific "looks natural" axis -
+// get live/visual confirmation before considering it validated.
 megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
 {
     megadog::hwbc::HierarchicalWbcConfig config;
@@ -138,20 +132,69 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     config.haa_posture_kp = 120.0;
     config.haa_posture_kd = 20.0;
     config.haa_posture_task_weight = 80.0;
-    config.haa_posture_nominal_rad = {-0.30, -0.30, 0.30, 0.30};
+    // Nominal bumped 0.30->0.40 (narrows stance, see kStandingJointTargetRad
+    // comment above) - verified stable in isolation (72s STAND + 128s
+    // TROT_IN_PLACE, eom=0.0000/valid=1 throughout, HAA never approached
+    // the ~0.50 rad danger zone). kp/kd/weight deliberately left at their
+    // original, previously-validated values here (unlike the earlier
+    // reverted dynamic-target attempt, which also softened them to 90/15/30
+    // - that combination is untested and not being re-tried).
+    //
+    // haa_posture_dynamic_band_rad below lets this task track the WBC's own
+    // moving qJointDesired within +-0.08 rad of the 0.40 nominal, instead of
+    // pinning it exactly - this is the "linh hoat" (flexible) motion like
+    // ultraDog's dynamic target, but bounded so the joint can never drift
+    // arbitrarily far from the now-verified-safe 0.40 rad anchor the way
+    // the earlier fully-unbounded attempt could (see WbcBase.h's doc
+    // comment on this field, and the reverted-experiment note above this
+    // function). 0.08 rad matches roughly the natural swing excursion
+    // already observed around the fixed target (+-0.09 rad during trot) -
+    // chosen to reduce the fixed-target-vs-swing-task fight without
+    // introducing a materially larger range than what was already measured
+    // safe. Needs its own dedicated sim verification before trusting it.
+    config.haa_posture_dynamic_band_rad = 0.08;
+    config.haa_posture_nominal_rad = {-0.40, -0.40, 0.40, 0.40};
     // leg_posture_task_weight must stay > 0 (see the long comment above) -
     // this is the one non-negotiable devq-specific WBC gain found this
-    // session, everything else here is otherwise-standard devq-length-scaled
-    // tuning predating today's ground-truth/GaitSchedule-mutex fixes.
+    // session, everything else here is otherwise-standard devq tuning
+    // predating today's ground-truth/GaitSchedule-mutex fixes.
     config.leg_posture_kp = 65.0;
     config.leg_posture_kd = 10.0;
     config.leg_posture_task_weight = 22.0;
     config.leg_posture_nominal_rad = {
-        -0.30, 0.574027, -1.37275,
-        -0.30, 0.574027, -1.37275,
-         0.30, 0.574027, -1.37275,
-         0.30, 0.574027, -1.37275,
+        -0.40, 0.574027, -1.37275,
+        -0.40, 0.574027, -1.37275,
+         0.40, 0.574027, -1.37275,
+         0.40, 0.574027, -1.37275,
     };
+    // A same-session experiment tried bounded-dynamic bands on HFE/KFE too
+    // (HFE 0.40, KFE 0.50 rad around nominal, FK-derived to leave 0.873 rad
+    // clear of the calf_position_max=0.0 singularity) - STAND was fully
+    // stable for 114s, but TROT_IN_PLACE was NOT: KFE breached the intended
+    // band within 14s (measured -0.817, past the -0.87275 edge) and by
+    // ~184s in, KFE hit exactly 0.0 - the singularity itself - causing a
+    // full tumble (roll spiked to 1.31 rad, torque saturated). Root cause:
+    // the band only bounds the *target* fed into leg_posture's soft,
+    // weighted QP task (weight 22) - it does not hard-clamp the actual
+    // solved joint position. During trot, the higher-effective-priority
+    // swing/stance tasks pulled the real KFE trajectory well past the
+    // clamped target, so the "safety net" only bounds what leg_posture asks
+    // for, not what the robot actually does - it never had a hard guarantee
+    // to begin with. The old fixed-nominal pin (below) worked precisely
+    // because it exerts a CONSTANT pull-back throughout the whole gait
+    // cycle rather than one that can itself track further from home; a
+    // clamped-but-moving target gives swing/stance more room to drag the
+    // real joint along with it. Fully reverted - do not re-attempt a
+    // dynamic/bounded KFE (or HFE, not independently isolated in that test
+    // either) target via this soft-task mechanism. A genuinely safe
+    // flexible KFE/HFE would need a hard inequality constraint in the QP
+    // (like formulateJointLimitsTask()'s approach) instead of another
+    // weighted cost - a materially bigger change, not attempted here.
+    // haa_posture's own band (above) is NOT implicated by this failure and
+    // stays enabled - it was independently verified safe across 350s of
+    // STAND+TROT_IN_PLACE with leg_posture fully pinned exactly as it is
+    // again now.
+    config.leg_posture_dynamic_band_rad.clear();
     config.leg_torque_limits_nm = {80.0, 80.0, 80.0};
     // Keeping qm_control's 10 s WBC warm-up here leaves STAND/TROT running
     // without base height/angular or swing-leg tasks for several seconds
