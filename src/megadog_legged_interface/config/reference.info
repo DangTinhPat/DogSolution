@@ -7,7 +7,9 @@ comHeight                           0.22
 ; pitch offsets baked into the URDF joint origins. This defaultJointState is
 ; the tuned stand/trot nominal pose expressed in that convention.
 ; HAA bumped 0.30->0.40 rad to narrow devq's stance - see the matching note
-; in task.info's initialState block (must stay in sync with this one).
+; in task.info's initialState block (must stay in sync with this one). 0.40
+; is CLOSED/FINAL - see MegadogController.cpp's kStandingJointTargetRad
+; comment for why narrowing further was tried and abandoned.
 defaultJointState
 {
    (0,0)  -0.40       ; LF_HAA

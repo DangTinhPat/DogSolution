@@ -60,6 +60,12 @@ struct HierarchicalWbcConfig
     // binary behavior: fully pinned when nominal is set, fully dynamic when
     // it's empty.
     double haa_posture_dynamic_band_rad = 0.0;
+    // NOTE: deliberately no haa_posture_swing_scale field here (unlike
+    // leg_posture_swing_scale below) - contact-gating this task the same
+    // way was tried and made things worse, not better (see
+    // MegadogController.cpp's kStandingJointTargetRad comment, attempt 2).
+    // Do not re-add without understanding why gating helped leg_posture but
+    // not haa_posture.
     // Soft posture regularization for the full 12-joint leg shape. This is
     // useful for robots whose nominal hip/knee signs differ from the A1
     // source project: stance/swing/base tasks can otherwise find a dynamically

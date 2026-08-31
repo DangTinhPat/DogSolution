@@ -50,15 +50,63 @@ constexpr double kWbcHfePostureKp = 0.0;
 constexpr double kWbcKfePostureKp = 0.0;
 constexpr double kDiagnosticsPeriodS = 2.0;
 
-// HAA bumped 0.30->0.40 rad to narrow devq's visibly "splayed" stance - see
-// the matching note in task.info/reference.info (must stay in sync with
-// both). Counter-intuitively this NARROWS the stance rather than widening
-// it: urdf-expert's FK analysis found devq's fixed hip lateral offset is a
-// much larger fraction of its 25%-shorter legs than A1's, so *increasing*
-// HAA magnitude is what pulls the foot back under the body here. 0.40 keeps
-// ~2.5cm clearance to the trunk's lateral envelope (0.45 is the practical
-// ceiling, 0.50 is a hard edge - do not go there without re-deriving the FK
-// margin for devq's actual geometry first).
+// HAA nominal is 0.40 rad (all four legs) - CLOSED/FINAL, do not revisit
+// without new evidence. Keep task.info's initialState and reference.info's
+// defaultJointState in sync with this.
+//
+// Original A1-derived nominal was 0.30; bumped to 0.40 to narrow devq's
+// visibly "splayed" stance. Counter-intuitively this NARROWS the stance
+// rather than widening it: urdf-expert's FK analysis found devq's fixed hip
+// lateral offset is a much larger fraction of its 25%-shorter legs than
+// A1's, so *increasing* HAA magnitude is what pulls the foot back under the
+// body here. 0.40 keeps ~2.5cm clearance to the ~0.50 rad FK-derived
+// self-collision danger zone.
+//
+// Narrowing further (toward 0.45) was attempted via five independent
+// mechanisms across both control layers, each isolating a different lever:
+//   1. WBC soft target + narrow band (0.45 nominal / 0.03 band) -> real HAA
+//      peaked 0.574 rad (past the danger zone).
+//   2. WBC per-leg contact gating on formulateHaaJointPostureTask(),
+//      mirroring the mechanism that worked for leg_posture/KFE -> made the
+//      SAME already-safe 0.40/0.08 baseline peak at 0.499 rad instead of
+//      0.464-0.465 - worse, not better (haa_posture's full-weight pull was
+//      never destabilizing, unlike leg_posture's).
+//   3. WBC hard QP inequality constraint at +-0.48 rad (joint_position_
+//      upper/lower_limits_override_rad, the same CBF mechanism verified
+//      safe for KFE) -> real HAA still reached 0.515 rad, past even that
+//      "hard" bound, with HAA_meas tracking HAA_mpc almost exactly at every
+//      violation - the NMPC itself was driving the joint past where any
+//      WBC-level constraint (evaluated a tick after the NMPC already
+//      committed) could stop it.
+//   4. NMPC-level soft box constraint added directly inside the SQP's own
+//      OptimalControlProblem (task.info's haaPositionLimit, bound=0.48;
+//      see createHaaPositionLimitConstraint()) with nominal deliberately
+//      left at 0.40 to isolate the mechanism -> peaked 0.482-0.491 rad,
+//      right at its own bound - confirms the natural swing excursion is
+//      already this large even before any narrowing is attempted.
+//   5. Friction-cone realism fix (frictionCoefficient 0.3->0.5, matching
+//      the sim's actual ground mu=1.0, on the theory that an artificially
+//      tight friction belief was forcing the optimizer to lean on hip
+//      motion instead of stance-leg GRF) -> no measurable change (0.482 vs
+//      0.491 rad across comparable runs - noise-level).
+//
+// Root cause (quantitative FK leverage analysis): devq's foot-lateral-
+// position leverage per radian of HAA is ~0.62x A1's (shorter legs +
+// different hip offset), so the identical Cartesian balance correction
+// A1's own control stack computes costs devq's HAA ~1.6x the swing A1
+// needs - closely matching the observed excursion. This is a genuine
+// geometric/dynamic property of devq's proportions, not a tuning gap.
+//
+// Decision: keep HAA nominal at 0.40. haaPositionLimit (bound=0.48) and
+// friction_coefficient=0.5 (below) are both kept anyway as harmless,
+// independently-justified improvements (a real NMPC-level safety net; a
+// more physically accurate friction belief) even though neither solved the
+// narrowing goal. The one remaining lever with a plausible mechanism -
+// loosening base pitch/roll tracking so corrections come from body lean
+// instead of hip motion - carries a demonstrated fall risk in this exact
+// codebase (see makeDevqWbcConfig()'s reverted-dynamic-target comment) and
+// was deliberately not pursued: stability was prioritized over further
+// narrowing.
 constexpr std::array<double, 12> kStandingJointTargetRad{
     -0.40, 0.574027, -1.37275,
     -0.40, 0.574027, -1.37275,
@@ -121,6 +169,17 @@ double clampJointTorque(const std::size_t joint_index, const double torque)
 megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
 {
     megadog::hwbc::HierarchicalWbcConfig config;
+    // Was WbcBase.h's default (0.3, A1-stock, never explicitly set here)
+    // until it was found to mismatch megadog_world.sdf's actual simulated
+    // ground friction (mu=1.0) by >3x - see kStandingJointTargetRad's
+    // comment above (attempt 5) for why this was investigated and what it
+    // did/didn't fix. 0.5 stays comfortably under the sim's real mu=1.0.
+    // Must be kept in lock-step with task.info's
+    // frictionConeSoftConstraint.frictionCoefficient (also 0.5) - the WBC's
+    // own friction cone task and the NMPC's belief must agree, or the NMPC
+    // could commit to a trajectory relying on more lateral GRF than this
+    // task1-priority QP constraint actually allows the WBC to deliver.
+    config.friction_coefficient = 0.5;
     config.swing_kp = 260.0;
     config.swing_kd = 28.0;
     config.swing_task_weight = 55.0;
@@ -142,17 +201,15 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     // - that combination is untested and not being re-tried).
     //
     // haa_posture_dynamic_band_rad below lets this task track the WBC's own
-    // moving qJointDesired within +-0.08 rad of the 0.40 nominal, instead of
-    // pinning it exactly - this is the "linh hoat" (flexible) motion like
+    // moving qJointDesired within +-band of the nominal, instead of pinning
+    // it exactly - this is the "linh hoat" (flexible) motion like
     // ultraDog's dynamic target, but bounded so the joint can never drift
-    // arbitrarily far from the now-verified-safe 0.40 rad anchor the way
-    // the earlier fully-unbounded attempt could (see WbcBase.h's doc
-    // comment on this field, and the reverted-experiment note above this
-    // function). 0.08 rad matches roughly the natural swing excursion
-    // already observed around the fixed target (+-0.09 rad during trot) -
-    // chosen to reduce the fixed-target-vs-swing-task fight without
-    // introducing a materially larger range than what was already measured
-    // safe. Needs its own dedicated sim verification before trusting it.
+    // arbitrarily far from a known-safe anchor the way an earlier
+    // fully-unbounded attempt could (see WbcBase.h's doc comment on this
+    // field). 0.08 around the 0.40 nominal (upper bound 0.48, 0.02 rad
+    // clear of the 0.50 hard edge) measures a peak of 0.464-0.491 rad in
+    // TROT_IN_PLACE across many runs - safe, and (per kStandingJointTargetRad's
+    // comment above) the final, closed value - do not narrow further.
     config.haa_posture_dynamic_band_rad = 0.08;
     config.haa_posture_nominal_rad = {-0.40, -0.40, 0.40, 0.40};
     // leg_posture_task_weight must stay > 0 (see the long comment above) -
@@ -317,11 +374,14 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     // multiple times this session).
     config.leg_posture_dynamic_band_rad.clear();
     config.leg_torque_limits_nm = {80.0, 80.0, 80.0};
-    // No KFE override - KFE is fully pinned above, doesn't need it. The
-    // override mechanism itself (joint_position_upper_limits_override_rad)
-    // stays available in WbcBase.h/.cpp for when leg_posture's band is
-    // next revisited.
+    // No KFE override - KFE is fully pinned above, doesn't need it.
+    // This mechanism was also tried on HAA (hard bound at +-0.48 rad,
+    // attempt 3 in kStandingJointTargetRad's comment above) - failed
+    // there (unlike KFE, where it held) because the NMPC itself, not the
+    // WBC, was driving the joint past the bound. Cleared/unused again;
+    // HAA narrowing is closed, do not re-add.
     config.joint_position_upper_limits_override_rad.clear();
+    config.joint_position_lower_limits_override_rad.clear();
     // Keeping qm_control's 10 s WBC warm-up here leaves STAND/TROT running
     // without base height/angular or swing-leg tasks for several seconds
     // after handoff, so the optimizer can settle into visually

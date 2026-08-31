@@ -14,6 +14,7 @@
 #include <ocs2_legged_robot/common/utils.h>
 #include <ocs2_legged_robot/gait/ModeSequenceTemplate.h>
 #include <ocs2_legged_robot/gait/MotionPhaseDefinition.h>
+#include <ocs2_oc/oc_problem/OptimalControlProblem.h>
 #include <ocs2_pinocchio_interface/PinocchioEndEffectorKinematics.h>
 #include <ocs2_core/misc/LinearInterpolation.h>
 #include <ocs2_robotic_tools/common/AngularVelocityMapping.h>
@@ -142,8 +143,25 @@ MegadogWbcRuntime::MegadogWbcRuntime(HierarchicalWbcConfig wbc_config, bool visu
     try {
         interface_ = megadog_legged_interface::createInterface();
 
-        mpc_ = std::make_unique<SqpMpc>(interface_->mpcSettings(), interface_->sqpSettings(),
-                                        interface_->getOptimalControlProblem(), interface_->getInitializer());
+        // Splice in the (optional, task.info-gated) NMPC-level HAA position
+        // limit before constructing SqpMpc - see
+        // createHaaPositionLimitConstraint()'s doc comment for why this has
+        // to be added to a local COPY of the OptimalControlProblem rather
+        // than to interface_ itself (LeggedRobotInterface::
+        // getOptimalControlProblem() only returns a const&, and the class is
+        // final with a private problemPtr_). SqpMpc's own constructor clones
+        // whatever OptimalControlProblem it's given, so handing it this
+        // local copy (instead of interface_->getOptimalControlProblem()
+        // directly) is the only change from the original call.
+        OptimalControlProblem ocp = interface_->getOptimalControlProblem();
+        auto haaPositionLimitConstraint = megadog_legged_interface::createHaaPositionLimitConstraint(
+            megadog_legged_interface::getConfigPath("task.info"), /*verbose=*/true);
+        if (haaPositionLimitConstraint) {
+            ocp.softConstraintPtr->add("haaPositionLimit", std::move(haaPositionLimitConstraint));
+        }
+
+        mpc_ = std::make_unique<SqpMpc>(interface_->mpcSettings(), interface_->sqpSettings(), ocp,
+                                        interface_->getInitializer());
         // Required wiring - see babyDog's src/ocs2/VENDORING.md "Gotchas found
         // while bringing up Milestone 2" for the segfault this avoids
         // (SwingTrajectoryPlanner never populated without it).

@@ -203,8 +203,11 @@ initialState
    ;; would give on devq's geometry - lowering it further would WIDEN the
    ;; stance, not narrow it). Increasing HAA magnitude is the only lever
    ;; that narrows devq's stance; 0.40 keeps ~2.5cm clearance to the trunk's
-   ;; lateral envelope (0.45 is the practical ceiling, 0.50 is a hard edge
-   ;; where the foot lands exactly on the trunk edge - do not go there).
+   ;; lateral envelope. 0.40 is CLOSED/FINAL - five independent mechanisms
+   ;; across both WBC and NMPC layers were tried to push this to 0.45 and
+   ;; all failed the same way (real joint overshoot past the 0.50 rad
+   ;; self-collision danger zone); see MegadogController.cpp's
+   ;; kStandingJointTargetRad comment for the full story and root cause.
    (12,0) -0.40       ; LF_HAA
    (13,0)  0.574027   ; LF_HFE
    (14,0) -1.37275    ; LF_KFE
@@ -295,9 +298,16 @@ R
   (23,23) 5000.0    ; z
 }
 
+; Was 0.3 (byte-identical to A1 stock, never re-derived for devq) until
+; found to mismatch megadog_world.sdf's actual simulated ground friction
+; (mu=1.0) by >3x - see MegadogController.cpp's kStandingJointTargetRad
+; comment (attempt 5) for the investigation and outcome. 0.5 stays
+; comfortably under the sim's real mu=1.0. Must be kept in lock-step with
+; makeDevqWbcConfig()'s friction_coefficient (also 0.5) - the WBC's own
+; friction cone task and the NMPC's belief here must agree.
 frictionConeSoftConstraint
 {
-  frictionCoefficient    0.3
+  frictionCoefficient    0.5
 
   ; relaxed log barrier parameters
   mu                     0.1
@@ -342,6 +352,36 @@ torqueLimitsTask
 frictionConeTask
 {
   frictionCoefficient    0.3
+}
+
+; NMPC-level (not WBC-level) soft box constraint on the 4 HAA joint angles -
+; see createHaaPositionLimitConstraint() in megadog_legged_interface and its
+; construction site in MegadogWbcRuntime.cpp. Added after three WBC-level
+; mechanisms all failed to narrow HAA past 0.40 rad (see
+; MegadogController.cpp's kStandingJointTargetRad comment): real HAA_meas
+; was found to track HAA_mpc (the NMPC's own solution) almost exactly, so a
+; WBC-level fix - evaluated one control tick after the NMPC already
+; committed to a trajectory - could not out-rank it. This constraint is
+; instead added directly into the SQP's own OptimalControlProblem,
+; evaluated at every transcription node across the whole horizon, so it can
+; bend the trajectory before an overshoot instead of reacting to one. Uses
+; a SquaredHingePenalty: exactly zero cost until a HAA state gets within
+; `delta` rad of `bound`, so it doesn't compete with base/foot tracking
+; anywhere except right at the safety edge. bound<=0 disables this
+; constraint entirely.
+;
+; Tested (attempt 4, HAA nominal deliberately left at 0.40 to isolate the
+; mechanism) at bound=0.48: peaked 0.482-0.491 rad, right at its own bound
+; - this confirmed the natural swing excursion is already this large even
+; without any narrowing, closing the question of whether nominal should be
+; raised further (it was not, and should not be - see
+; kStandingJointTargetRad's comment for the final decision). Kept
+; permanently at bound=0.48 as a harmless NMPC-level safety net.
+haaPositionLimit
+{
+  bound   0.48
+  mu      80.0
+  delta   0.02
 }
 
 swingLegTask
