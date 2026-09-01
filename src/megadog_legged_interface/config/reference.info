@@ -10,20 +10,25 @@ comHeight                           0.22
 ; in task.info's initialState block (must stay in sync with this one). 0.40
 ; is CLOSED/FINAL - see MegadogController.cpp's kStandingJointTargetRad
 ; comment for why narrowing further was tried and abandoned.
+; HFE/KFE bumped 0.574027/-1.37275 -> 0.478618/-1.181561: FK-solved to
+; actually match comHeight=0.22 above (the old values naturally produced
+; ~0.239m instead) - see MegadogController.cpp's kStandingJointTargetRad
+; comment for the full story (this was the cause of STAND visibly
+; settling higher than TROT_IN_PLACE).
 defaultJointState
 {
    (0,0)  -0.40       ; LF_HAA
-   (1,0)   0.574027   ; LF_HFE
-   (2,0)  -1.37275    ; LF_KFE
+   (1,0)   0.478618   ; LF_HFE
+   (2,0)  -1.181561   ; LF_KFE
    (3,0)  -0.40       ; LH_HAA
-   (4,0)   0.574027   ; LH_HFE
-   (5,0)  -1.37275    ; LH_KFE
+   (4,0)   0.478618   ; LH_HFE
+   (5,0)  -1.181561   ; LH_KFE
    (6,0)   0.40       ; RF_HAA
-   (7,0)   0.574027   ; RF_HFE
-   (8,0)  -1.37275    ; RF_KFE
+   (7,0)   0.478618   ; RF_HFE
+   (8,0)  -1.181561   ; RF_KFE
    (9,0)   0.40       ; RH_HAA
-   (10,0)  0.574027   ; RH_HFE
-   (11,0) -1.37275    ; RH_KFE
+   (10,0)  0.478618   ; RH_HFE
+   (11,0) -1.181561   ; RH_KFE
 }
 
 initialModeSchedule

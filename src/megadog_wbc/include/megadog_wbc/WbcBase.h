@@ -19,6 +19,7 @@
 #include <ocs2_legged_robot/gait/MotionPhaseDefinition.h>
 #include <ocs2_pinocchio_interface/PinocchioEndEffectorKinematics.h>
 
+#include <limits>
 #include <vector>
 
 namespace megadog
@@ -204,7 +205,7 @@ public:
 
 protected:
     void updateMeasured(const vector_t& rbdStateMeasured);
-    void updateDesired(const vector_t& stateDesired, const vector_t& inputDesired, scalar_t period);
+    void updateDesired(const vector_t& stateDesired, const vector_t& inputDesired, scalar_t period, size_t mode);
     vector_t updateCmd(vector_t x_optimal);
 
     size_t getNumDecisionVars() const { return numDecisionVars_; }
@@ -238,7 +239,23 @@ private:
 
     vector_t qMeasured_, vMeasured_, inputLast_;
     vector_t qDesired_, vDesired_, baseAccDesired_;
+    // Raw one-tick finite difference of inputDesired (see updateDesired()),
+    // used as feedforward for baseAccDesired_. inputDesired's per-leg
+    // contact-force components can jump near-discontinuously across a
+    // contact-mode switch (diagonal swap), which this difference divides by
+    // a ~1ms(sim)/5ms(real) period - amplifying that jump by up to ~1000x
+    // into a one-tick spike, felt as a phantom "jerk the body" pulse right
+    // at each phase transition (root cause of a user-reported dip during
+    // trot, found by root-cause investigation - see updateDesired()'s
+    // comment for the fix). modeLast_ lets updateDesired() detect exactly
+    // that one tick and hold jointAccel_ at zero instead of differentiating
+    // across the discontinuity - std::numeric_limits<size_t>::max() as the
+    // initial sentinel deliberately can't match any real ModeNumber, so the
+    // very first tick after construction is also treated as a "mode
+    // change" (safe: inputLast_ is zero then too, so the real difference
+    // would have been ~0 anyway).
     vector_t jointAccel_;
+    size_t modeLast_ = std::numeric_limits<size_t>::max();
     matrix_t j_, dj_;
     matrix_t base_j_, base_dj_;
 

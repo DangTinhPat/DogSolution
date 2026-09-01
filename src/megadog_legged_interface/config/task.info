@@ -52,7 +52,21 @@ model_settings
 swing_trajectory_config
 {
   liftOffVelocity               0.06
-  touchDownVelocity            -0.12
+  ; Was -0.12 (~20% faster than ultraDog's -0.10) until a user-reported
+  ; "dip" during trot phase transitions was root-caused: contact is
+  ; scheduled, not sensed (no real contact sensor - see
+  ; BaseStateEstimator.h), and formulateNoContactMotionTask() hard-commits
+  ; to "this leg is down" exactly at the gait schedule's switching time
+  ; regardless of whether the foot has physically landed yet. A faster
+  ; touchdown velocity widens that timing-mismatch window, letting the WBC
+  ; occasionally allocate support force to a leg not yet on the ground,
+  ; transiently under-loading the real stance leg(s). -0.10 matches
+  ; ultraDog exactly and shrinks both the momentum a real touchdown must
+  ; absorb and the position-mismatch-per-unit-tracking-lag at the switch
+  ; instant. Paired with a WbcBase.cpp fix (jointAccel_/modeLast_) for a
+  ; second, independent contributor to the same symptom - see that file's
+  ; doc comment.
+  touchDownVelocity            -0.10
   swingHeight                   0.05  ; 5 cm clearance for a lower, A1-like swing arc on megaDog
   swingTimeScale                0.15
 }
@@ -208,18 +222,26 @@ initialState
    ;; all failed the same way (real joint overshoot past the 0.50 rad
    ;; self-collision danger zone); see MegadogController.cpp's
    ;; kStandingJointTargetRad comment for the full story and root cause.
+   ;; HFE/KFE bumped 0.574027/-1.37275 -> 0.478618/-1.181561: urdf-expert's
+   ;; FK analysis found the old values were never kinematically consistent
+   ;; with p_base_z=0.22 above (naturally producing ~0.239m instead), which
+   ;; is why STAND (all 4 legs pinned here) visibly settled higher than
+   ;; TROT_IN_PLACE (only 2 legs pinned at a time). New values solved via
+   ;; FK to land exactly at 0.22m - see MegadogController.cpp's
+   ;; kStandingJointTargetRad comment for the full story, including the
+   ;; KFE-singularity-clearance re-verification this needed.
    (12,0) -0.40       ; LF_HAA
-   (13,0)  0.574027   ; LF_HFE
-   (14,0) -1.37275    ; LF_KFE
+   (13,0)  0.478618   ; LF_HFE
+   (14,0) -1.181561   ; LF_KFE
    (15,0) -0.40       ; LH_HAA
-   (16,0)  0.574027   ; LH_HFE
-   (17,0) -1.37275    ; LH_KFE
+   (16,0)  0.478618   ; LH_HFE
+   (17,0) -1.181561   ; LH_KFE
    (18,0)  0.40       ; RF_HAA
-   (19,0)  0.574027   ; RF_HFE
-   (20,0) -1.37275    ; RF_KFE
+   (19,0)  0.478618   ; RF_HFE
+   (20,0) -1.181561   ; RF_KFE
    (21,0)  0.40       ; RH_HAA
-   (22,0)  0.574027   ; RH_HFE
-   (23,0) -1.37275    ; RH_KFE
+   (22,0)  0.478618   ; RH_HFE
+   (23,0) -1.181561   ; RH_KFE
 }
 
 ; standard state weight matrix
@@ -241,7 +263,23 @@ Q
   (6,6)   1000.0   ; p_base_x
   (7,7)   1000.0   ; p_base_y
   (8,8)   1500.0   ; p_base_z
-  (9,9)   100.0    ; theta_base_z
+  ; theta_base_z (yaw) was 100.0 - a clear outlier vs. roll/pitch's 300.0
+  ; (3-15x weaker than every other base-pose axis). Root-caused this session
+  ; (balance-expert) as why lateral strafing (base_velocity_y_m_s only,
+  ; heading meant to stay fixed) showed a persistent ~0.035-0.065 rad yaw
+  ; drift that never decayed back to the commanded heading over 80+s: with
+  ; yaw this cheap to violate, the NMPC's own optimal trajectory had little
+  ; incentive to fully cancel the emergent yaw moment that diagonal-pair
+  ; lateral trotting naturally produces (asymmetric CoM-Y-acceleration GRF
+  ; lever arms) - no downstream WBC gain can fix a bias already baked into
+  ; the MPC's own reference. Raised to parity with theta_base_y/x (300.0) -
+  ; a single-axis change, distinct from an earlier reverted experiment that
+  ; touched position AND roll/pitch weights together and amplified
+  ; oscillation (that regression was attributed to the position/roll/pitch
+  ; coupling, not yaw - see comment above). If this alone doesn't fully
+  ; close the gap, base_angular_kp/kd (makeDevqWbcConfig()) is the next,
+  ; separately-tested lever - see MegadogController.cpp's comment there.
+  (9,9)   300.0    ; theta_base_z
   (10,10) 300.0    ; theta_base_y
   (11,11) 300.0    ; theta_base_x
 

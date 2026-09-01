@@ -311,9 +311,11 @@ class SimControlGui:
         # Publishes to megadog_controller's "/megadog/cmd" (std_msgs/String)
         # topic - see MegadogController.cpp's on_configure() subscription for
         # the accepted values. HOME (zero effort, robot rests under gravity)
-        # is the state on controller activation; the other four are
-        # one-shot commands that switch the WBC's active gait/velocity and
-        # keep running until the next command changes it.
+        # is the state on controller activation; every other button is a
+        # one-shot command that switches the WBC's active gait/velocity
+        # (including which axis - forward/back, left/right strafe, or
+        # left/right turn) and keeps running until the next command
+        # changes it.
         fsm_frame = ttk.LabelFrame(
             self.root, text='FSM (needs Sim or Real controller running)', padding=(14, 10))
         fsm_frame.pack(fill='x', padx=16, pady=(6, 6))
@@ -331,6 +333,27 @@ class SimControlGui:
             button = ttk.Button(fsm_row, text=label, command=lambda v=value: self._publish_cmd(v))
             button.pack(side='left', padx=(0 if value == 'home' else 8, 0))
             self.fsm_widgets.append(button)
+
+        # Second row: lateral strafe (genuine sideways translation, heading
+        # held fixed) + yaw-rate turning - both added later than the row
+        # above, see MegadogController.cpp's STRAFE_LEFT/STRAFE_RIGHT/
+        # TURN_LEFT/TURN_RIGHT states. Kept conservative-speed by design
+        # (kStrafeSpeedMps/kTurnRateRadS in MegadogController.cpp) - no GUI
+        # speed control here, these buttons just select the FSM state like
+        # the row above.
+        fsm_row2 = ttk.Frame(fsm_frame)
+        fsm_row2.pack(fill='x', pady=(8, 0))
+        buttons2 = [
+            ('◀ Đi ngang trái', 'strafe_left'),
+            ('Đi ngang phải ▶', 'strafe_right'),
+            ('↺ Xoay trái', 'turn_left'),
+            ('Xoay phải ↻', 'turn_right'),
+        ]
+        for label, value in buttons2:
+            button = ttk.Button(fsm_row2, text=label, command=lambda v=value: self._publish_cmd(v))
+            button.pack(side='left', padx=(0 if value == 'strafe_left' else 8, 0))
+            self.fsm_widgets.append(button)
+
         self._set_fsm_controls_enabled(False)
 
     def _build_force_panel(self):

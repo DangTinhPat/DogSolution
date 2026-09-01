@@ -105,7 +105,7 @@ vector_t WbcBase::update(const vector_t& stateDesired, const vector_t& inputDesi
     }
 
     updateMeasured(rbdStateMeasured);
-    updateDesired(stateDesired, inputDesired, period);
+    updateDesired(stateDesired, inputDesired, period, mode);
 
     return {};
 }
@@ -164,7 +164,7 @@ void WbcBase::updateMeasured(const vector_t& rbdStateMeasured)
     base_dj_ = base_dj;
 }
 
-void WbcBase::updateDesired(const vector_t& stateDesired, const vector_t& inputDesired, scalar_t period)
+void WbcBase::updateDesired(const vector_t& stateDesired, const vector_t& inputDesired, scalar_t period, size_t mode)
 {
     const auto& model = pinocchioInterfaceDesired_.getModel();
     auto& data = pinocchioInterfaceDesired_.getData();
@@ -184,7 +184,19 @@ void WbcBase::updateDesired(const vector_t& stateDesired, const vector_t& inputD
     pinocchio::forwardKinematics(model, data, qDesired_, vDesired_);
 
     // update base acc desired
-    jointAccel_ = centroidal_model::getJointVelocities(inputDesired - inputLast_, info_) / period;
+    // Skip the finite difference on the exact tick the contact mode changes
+    // (diagonal swap) - see jointAccel_'s doc comment in WbcBase.h for why:
+    // inputDesired's per-leg contact-force components can jump near-
+    // discontinuously across that boundary, and dividing by a ~1ms/5ms
+    // period amplified it into a phantom body-jerk feedforward spike right
+    // at each phase transition. Every other tick differentiates normally -
+    // this targets only the transition tick, no gain is touched.
+    if (mode != modeLast_) {
+        jointAccel_ = vector_t::Zero(info_.actuatedDofNum);
+        modeLast_ = mode;
+    } else {
+        jointAccel_ = centroidal_model::getJointVelocities(inputDesired - inputLast_, info_) / period;
+    }
     inputLast_ = inputDesired;
 
     using Matrix6 = Eigen::Matrix<scalar_t, 6, 6>;

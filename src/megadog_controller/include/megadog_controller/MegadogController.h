@@ -65,6 +65,15 @@ enum class MegadogFsmState
     TROT_IN_PLACE,
     FORWARD,
     BACKWARD,
+    // Genuine sideways translation (crab-walk) - base_velocity_y_m_s only,
+    // heading held fixed. NOT the robot turning to face a new direction
+    // then walking forward - see MegadogWbcCommand's base_velocity_y_m_s
+    // field and setTargetTrajectories()'s handling of it.
+    STRAFE_LEFT,
+    STRAFE_RIGHT,
+    // Yaw-rate steering (rotate in place) - base_yaw_rate_rad_s only.
+    TURN_LEFT,
+    TURN_RIGHT,
 };
 
 class MegadogController : public controller_interface::ControllerInterface
@@ -151,10 +160,23 @@ private:
     double locomotion_runtime_epoch_wbc_time_s_ = 0.0;
     // Ramped toward the FSM state's target velocity each tick (see update())
     // instead of being commanded as a step - see kVelocityRampMps2's doc
-    // comment in MegadogController.cpp for why.
+    // comment in MegadogController.cpp for why. Runs unconditionally every
+    // tick regardless of fsm_state, so switching FROM a state that was
+    // driving one of these axes always ramps it back toward 0 instead of
+    // leaving it stuck nonzero - see the target_velocity_x/y/target_yaw_rate
+    // ternary chain in update() for the shared mechanism all three axes use.
     double smoothed_velocity_x_m_s_ = 0.0;
+    double smoothed_velocity_y_m_s_ = 0.0;
+    double smoothed_yaw_rate_rad_s_ = 0.0;
     std::array<double, 12> last_valid_effort_{};
     bool has_last_valid_effort_ = false;
+    // Blends effort from last_valid_effort_ toward the freshly-computed WBC
+    // torque over kEffortBlendDurationS once runtime_->update() resumes
+    // succeeding after a hold (see kEffortBlendDurationS's doc comment in
+    // MegadogController.cpp) - turns the hold-release instant into a ramp
+    // instead of a step.
+    bool effort_hold_active_ = false;
+    double effort_blend_elapsed_s_ = 0.0;
 
     double start_time_s_ = -1.0;
     double elapsed_s_ = 0.0;

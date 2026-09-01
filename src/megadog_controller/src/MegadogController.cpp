@@ -27,10 +27,18 @@ using config_type = controller_interface::interface_configuration_type;
 constexpr double kJointKd = 2.0;
 constexpr double kTorqueLimitNm = 80.0;  // sim debug limit; intentionally above devq's physical rating.
 constexpr double kHaaTorqueLimitNm = 80.0;
-// Comfortably under reference.info's targetDisplacementVelocity (0.5 m/s) -
-// the reference manager's own upper bound for how fast a single MPC horizon
-// is allowed to ask the base to move (devq/babyDog's own reference.info
-// value, see the megaDog port plan breezy-purring-moler.md).
+// NOTE: was documented as "comfortably under reference.info's
+// targetDisplacementVelocity (0.5 m/s)" - corrected this session
+// (nmpc-expert investigation): megaDog's actual reference.info value is 0.3,
+// not 0.5 (0.5 was apparently a different repo's number), AND that field is
+// dead configuration for this runtime path anyway - grep-confirmed only
+// LeggedRobotPoseCommandNode.cpp/TargetTrajectoriesPublisher.cpp (a
+// different, unused entry point) read it; MegadogWbcRuntime::
+// setTargetTrajectories() computes its own timeToTarget from
+// mpc.timeHorizon directly (task.info) and never touches
+// targetDisplacementVelocity/targetRotationVelocity. kWalkSpeedMps is not
+// actually bounded by anything in reference.info - it's simply the
+// deliberately-chosen forward/backward walking speed.
 constexpr double kWalkSpeedMps = 0.18;
 // Max |d(velocity)/dt| applied to the FSM's target velocity before it reaches
 // MegadogWbcCommand::base_velocity_x_m_s - see update()'s ramp toward
@@ -41,7 +49,61 @@ constexpr double kWalkSpeedMps = 0.18;
 // "catch up to" abruptly - visible as a jerky stutter rather than a
 // smooth speed-up/slow-down. At this rate, a full forward<->backward reversal
 // (2*kWalkSpeedMps) takes 2*kWalkSpeedMps/kVelocityRampMps2 = 1.2s.
+//
+// This same "step-command -> jerky stutter" mechanism is why kStrafeSpeedMps/
+// kTurnRateRadS below get their OWN dedicated ramp constants rather than
+// reusing this one - researcher-agent-confirmed: task.info's sqp.sqpIteration=1
+// (Real-Time-Iteration-style NMPC, one Newton step per solve, not iterated to
+// convergence) does NOT "absorb" a stepped reference within a single control
+// tick the way a fully-converged solver might get closer to doing (Diehl,
+// Bock & Schlöder 2005's RTI theory - a reference discontinuity is absorbed
+// gradually over several solves, not immediately) - so every commanded axis
+// genuinely needs its own explicit ramp, this is not just a cosmetic nicety.
 constexpr double kVelocityRampMps2 = 0.8;
+// Lateral (crab-walk) and yaw-rate (turning) locomotion - added after
+// forward/backward, deliberately conservative starting values since this
+// exercises a fundamentally different (frontal-plane, for lateral) balance
+// mode never verified in this codebase before, on top of devq's already-tight
+// HAA self-collision margin (~2.5cm clearance to the 0.50 rad danger zone at
+// the closed/final 0.40 rad nominal - see kStandingJointTargetRad's comment
+// below). Multi-agent research (researcher/locomotion-command-expert/
+// nmpc-expert/trot-gait-expert, this session) cross-checked against
+// qiayuanl/legged_control, unitree_guide, and MIT Cheetah 3's convex-MPC
+// paper (Di Carlo et al., IROS 2018) all confirm: (vx, vy, wz) is the
+// canonical 3-DOF command interface for this class of controller, gait.info's
+// mode template needs zero changes for lateral/rotational motion (foot
+// placement is a free NMPC optimization result, not a fixed heuristic tied to
+// a direction), and every reference sets a narrower lateral envelope than
+// forward (MIT Cheetah 3: 3 m/s fwd vs 1 m/s lateral vs 180 deg/s yaw;
+// unitree_guide's A1/Go1 config: ~75% of forward) - the concrete numbers
+// don't transfer (different platform/geometry), but the qualitative pattern
+// (raise these only after a dedicated lateral/turning HAA/KFE excursion
+// stress test, and keep them well under kWalkSpeedMps/a full-speed turn)
+// does. Simultaneous multi-axis commands (e.g. forward+turn at once) are
+// deliberately OUT of scope for this first implementation - each new FSM
+// state below drives exactly one axis, so the "omnidirectional motion
+// anisotropy" combined-magnitude infeasibility prior art warns about
+// (Zhang, Xu, Cai & Zhu, arXiv:2403.10101) cannot arise here by construction,
+// not by an added rejection check - deferred to a future arc-motion feature.
+constexpr double kStrafeSpeedMps = 0.10;
+constexpr double kLateralVelocityRampMps2 = 0.4;
+// Was 0.3 rad/s (~17.2 deg/s) - live sim testing this session found this was
+// NOT safe: sustained turn_right at wz=-0.3 pushed a real HAA joint to
+// -0.509 rad, PAST the established 0.50 rad self-collision danger zone,
+// ~10s into steady turning (not just during the direction-reversal
+// transient) - eom_residual/roll/pitch stayed nominal throughout (this
+// wasn't a fall), but a joint that far past the danger zone is a real
+// self-collision/hardware-damage risk on real devq, not just a simulated
+// near-miss. Cut by 60% to 0.12 rad/s (~6.9 deg/s) pending a fresh
+// dedicated stress test at this new value (not yet re-verified as of this
+// comment - re-run the same sustained-turn HAA-excursion test before
+// trusting this number either). Turning demands more HAA excursion than
+// lateral strafing at a comparable ramp rate did in this same test pass
+// (strafe never approached this danger zone) - not yet root-caused why,
+// flagged as a real asymmetry worth investigating if this speed still
+// proves too tight after re-verification.
+constexpr double kTurnRateRadS = 0.12;
+constexpr double kYawRateRampRadS2 = 0.3;
 constexpr double kComHeightM = 0.22;
 constexpr double kStandupDurationS = 3.0;
 constexpr double kStandupKp = 35.0;
@@ -49,6 +111,22 @@ constexpr double kStandupKd = 1.8;
 constexpr double kWbcHfePostureKp = 0.0;
 constexpr double kWbcKfePostureKp = 0.0;
 constexpr double kDiagnosticsPeriodS = 2.0;
+// Duration effort is ramped (via smoothStep()) from last_valid_effort_
+// toward the freshly-computed WBC torque once runtime_->update() resumes
+// succeeding after a hold - e.g. the ~20ms/kMpcResetSettleAdvances-tick
+// hold MegadogWbcRuntime imposes while waiting for a fresh MPC policy
+// after beginNewLocomotionSegment() (STAND->TROT_IN_PLACE and other
+// locomotion-segment entries). Without this, effort snapped in a single
+// control tick from STAND's frozen stance torque to trot's first active
+// torque (root-caused this session as the trigger of a "wobbles briefly
+// before settling into trot" symptom - see effort_hold_active_'s doc
+// comment in MegadogController.h). 50ms is a few multiples of the nominal
+// ~20ms hold (so it fully covers the actual gap, not just part of it) but
+// small relative to base_height/linear/angular_kp/kd's own ~0.3-0.7s
+// overdamped settling time - it only removes the initiating kick, it
+// doesn't meaningfully add to how long the (separately unavoidable, not
+// touched here) settling itself takes.
+constexpr double kEffortBlendDurationS = 0.05;
 
 // HAA nominal is 0.40 rad (all four legs) - CLOSED/FINAL, do not revisit
 // without new evidence. Keep task.info's initialState and reference.info's
@@ -107,11 +185,41 @@ constexpr double kDiagnosticsPeriodS = 2.0;
 // codebase (see makeDevqWbcConfig()'s reverted-dynamic-target comment) and
 // was deliberately not pursued: stability was prioritized over further
 // narrowing.
+//
+// HFE/KFE bumped 0.574027/-1.37275 -> 0.478618/-1.181561: the user noticed
+// STAND settling visibly higher than TROT_IN_PLACE despite both commanding
+// the same comHeight=0.22 (kComHeightM below). urdf-expert's FK analysis
+// found the OLD HFE/KFE values were never actually kinematically consistent
+// with comHeight=0.22 - they naturally produce a foot-frame height of
+// 0.23876m (URDF frame, ~19mm too high). STAND hard-pins all 4 legs to
+// this posture at once (formulateLegJointPostureTask, weight 22), so it
+// wins over the single base-height task and settles near the posture's
+// own natural height; TROT_IN_PLACE only pins 2 legs (the current stance
+// diagonal) at a time, so it's pulled closer to the true 0.22 target -
+// hence the visible STAND/TROT height mismatch. The new values were
+// solved via FK (Newton iteration, holding foot x/y fixed) to land
+// exactly at 0.22000m for all 4 legs, so STAND and TROT should now settle
+// at consistent heights. Lateral foot spread barely changes (+0.75mm).
+// KFE's static clearance to the calf_position_max=0.0 singularity shrinks
+// from 1.373 to 1.182 rad (~14%) - still far from the ~0.80-0.87 rad
+// band-edges documented as unsafe in this session's earlier failed
+// dynamic-band experiments (see leg_posture_dynamic_band_rad's history
+// below), but re-verified via a dedicated stress test (see git log/commit
+// message for this change) specifically watching KFE_meas peak excursion,
+// since dynamic swing has been shown to outrun the static nominal before.
+//
+// A second, SEPARATE, ~0.02m systematic offset was also found (foot
+// collision sphere radius=0.0205m not accounted for in the NMPC's
+// point-foot kinematic model, vs. ground-truth measurement using the true
+// physical - sphere-inclusive - base height) - this affects STAND and
+// TROT equally, so it doesn't cause the mismatch fixed above, and is out
+// of scope here (would need a fix in the measurement/terrain-height path,
+// not joint angles) - flagged, not fixed.
 constexpr std::array<double, 12> kStandingJointTargetRad{
-    -0.40, 0.574027, -1.37275,
-    -0.40, 0.574027, -1.37275,
-     0.40, 0.574027, -1.37275,
-     0.40, 0.574027, -1.37275,
+    -0.40, 0.478618, -1.181561,
+    -0.40, 0.478618, -1.181561,
+     0.40, 0.478618, -1.181561,
+     0.40, 0.478618, -1.181561,
 };
 
 bool isHaaJointIndex(const std::size_t joint_index)
@@ -187,6 +295,30 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     config.base_height_kd = 140.0;
     config.base_linear_kp = 400.0;
     config.base_linear_kd = 100.0;
+    // Tried raising to stock 400.0/140.0 this session as step 2 of fixing
+    // lateral-strafe yaw drift (after task.info's theta_base_z Q-weight
+    // 100->300, step 1). Verified via a controlled STAND->STRAFE_LEFT sim
+    // A/B (matched initial conditions, delta measured relative to the
+    // pre-strafe STAND heading, not raw yaw - STAND's own anchor drifts
+    // with whatever heading it's entered from, so absolute yaw isn't
+    // comparable across runs): induced yaw delta stayed ~0.04-0.05 rad
+    // across all three configurations tested (baseline, +Q(9,9) alone,
+    // +Q(9,9)+this gain) - raising this gain provided no measurable
+    // benefit. Reverted to avoid the unnecessary risk of touching a gain
+    // family with documented (if unrelated-cause) fall history in this
+    // codebase, for zero measured gain. TROT_IN_PLACE regression at 400/140
+    // was itself clean (29s+, no instability) - this revert is about
+    // "no benefit, don't carry the risk," not a re-discovered instability.
+    // The residual ~0.04-0.05 rad heading drift during sustained lateral
+    // strafe is a real, characterized, SAFE (roll/pitch/eom/HAA/KFE all
+    // stayed nominal throughout every test) limitation of this first
+    // implementation - most likely a genuine physical yaw moment from
+    // asymmetric diagonal-pair GRF lever arms during Y-direction
+    // acceleration that neither lever tested here fully cancels. Not
+    // resolved this session; a real fix would need a different mechanism
+    // (e.g. NMPC-level structural change, or investigating whether it's
+    // specific to devq's stance asymmetry) - flagged as follow-up work,
+    // not attempted further here per the conservative-first-pass scope.
     config.base_angular_kp = 300.0;
     config.base_angular_kd = 105.0;
     config.haa_posture_kp = 120.0;
@@ -220,10 +352,10 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     config.leg_posture_kd = 10.0;
     config.leg_posture_task_weight = 22.0;
     config.leg_posture_nominal_rad = {
-        -0.40, 0.574027, -1.37275,
-        -0.40, 0.574027, -1.37275,
-         0.40, 0.574027, -1.37275,
-         0.40, 0.574027, -1.37275,
+        -0.40, 0.478618, -1.181561,
+        -0.40, 0.478618, -1.181561,
+         0.40, 0.478618, -1.181561,
+         0.40, 0.478618, -1.181561,
     };
     // A same-session experiment tried bounded-dynamic bands on HFE/KFE too
     // (HFE 0.40, KFE 0.50 rad around nominal, FK-derived to leave 0.873 rad
@@ -382,12 +514,28 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     // HAA narrowing is closed, do not re-add.
     config.joint_position_upper_limits_override_rad.clear();
     config.joint_position_lower_limits_override_rad.clear();
-    // Keeping qm_control's 10 s WBC warm-up here leaves STAND/TROT running
-    // without base height/angular or swing-leg tasks for several seconds
-    // after handoff, so the optimizer can settle into visually
-    // impossible-looking leg poses before the real posture tasks ever
-    // engage.
-    config.init_task_seconds = 0.0;
+    // qm_control's full 10s warm-up leaves STAND/TROT running without base
+    // height/angular/posture/swing tasks (HierarchicalWbc.cpp's task1) for
+    // several seconds after handoff, so the optimizer can settle into
+    // visually impossible-looking leg poses before the real posture tasks
+    // ever engage - so 0.0 was used for a long time instead. But 0.0 makes
+    // `if (time < config_.init_task_seconds)` permanently false (time>=0.0
+    // always), which is a DEAD branch, not "no warm-up on this one
+    // handoff" - it removes task1's ramp-in at EVERY locomotion-segment
+    // entry (runtime_time_s resets to ~0 there), including STAND->TROT.
+    // Root-caused this session as a second, independent contributor
+    // (alongside MegadogController's own effort_hold_active_ blend above)
+    // to a "wobbles briefly before settling into trot" symptom: task1
+    // (base_height/linear/angular + haa/leg posture + swing, all at full
+    // configured gain) engages at full weight the exact same tick its own
+    // targets discontinuously jump from STAND's static reference to
+    // trot's first optimized point. 0.15s is long enough to span the
+    // ~20ms/kMpcResetSettleAdvances hold with margin, but far short of
+    // the original 10s that caused the visually-bad-pose problem in the
+    // first place - short enough that task0's redundant-DOF freedom
+    // during the ramp shouldn't be visible as an ugly pose, only as a
+    // gentler transition into task1 authority.
+    config.init_task_seconds = 0.15;
     return config;
 }
 
@@ -448,6 +596,14 @@ const char* fsmStateName(const MegadogFsmState state)
             return "FORWARD";
         case MegadogFsmState::BACKWARD:
             return "BACKWARD";
+        case MegadogFsmState::STRAFE_LEFT:
+            return "STRAFE_LEFT";
+        case MegadogFsmState::STRAFE_RIGHT:
+            return "STRAFE_RIGHT";
+        case MegadogFsmState::TURN_LEFT:
+            return "TURN_LEFT";
+        case MegadogFsmState::TURN_RIGHT:
+            return "TURN_RIGHT";
     }
     return "UNKNOWN";
 }
@@ -456,13 +612,17 @@ bool isWbcState(const MegadogFsmState state)
 {
     return state == MegadogFsmState::STAND || state == MegadogFsmState::STAND_NMPC ||
            state == MegadogFsmState::STAND_WBC || state == MegadogFsmState::TROT_IN_PLACE || state == MegadogFsmState::FORWARD ||
-           state == MegadogFsmState::BACKWARD;
+           state == MegadogFsmState::BACKWARD || state == MegadogFsmState::STRAFE_LEFT ||
+           state == MegadogFsmState::STRAFE_RIGHT || state == MegadogFsmState::TURN_LEFT ||
+           state == MegadogFsmState::TURN_RIGHT;
 }
 
 bool isLocomotionState(const MegadogFsmState state)
 {
     return state == MegadogFsmState::TROT_IN_PLACE || state == MegadogFsmState::FORWARD ||
-           state == MegadogFsmState::BACKWARD;
+           state == MegadogFsmState::BACKWARD || state == MegadogFsmState::STRAFE_LEFT ||
+           state == MegadogFsmState::STRAFE_RIGHT || state == MegadogFsmState::TURN_LEFT ||
+           state == MegadogFsmState::TURN_RIGHT;
 }
 }  // namespace
 
@@ -641,8 +801,16 @@ controller_interface::CallbackReturn MegadogController::on_configure(const rclcp
                 next = MegadogFsmState::FORWARD;
             } else if (msg->data == "backward") {
                 next = MegadogFsmState::BACKWARD;
+            } else if (msg->data == "strafe_left") {
+                next = MegadogFsmState::STRAFE_LEFT;
+            } else if (msg->data == "strafe_right") {
+                next = MegadogFsmState::STRAFE_RIGHT;
+            } else if (msg->data == "turn_left") {
+                next = MegadogFsmState::TURN_LEFT;
+            } else if (msg->data == "turn_right") {
+                next = MegadogFsmState::TURN_RIGHT;
             } else {
-                RCLCPP_WARN(get_node()->get_logger(), "Unknown /megadog/cmd '%s' (expected home|stand|stand_nmpc|stand_wbc|trot_in_place|forward|trot|trot_forward|backward)",
+                RCLCPP_WARN(get_node()->get_logger(), "Unknown /megadog/cmd '%s' (expected home|stand|stand_nmpc|stand_wbc|trot_in_place|forward|trot|trot_forward|backward|strafe_left|strafe_right|turn_left|turn_right)",
                              msg->data.c_str());
                 return;
             }
@@ -672,6 +840,8 @@ controller_interface::CallbackReturn MegadogController::on_activate(const rclcpp
     last_fsm_state_seen_ = MegadogFsmState::HOME;
     last_valid_effort_.fill(0.0);
     has_last_valid_effort_ = false;
+    effort_hold_active_ = false;
+    effort_blend_elapsed_s_ = 0.0;
     latched_base_position_reference_m_ = {};
     latched_base_yaw_reference_rad_ = 0.0;
     base_reference_latched_ = false;
@@ -682,6 +852,8 @@ controller_interface::CallbackReturn MegadogController::on_activate(const rclcpp
     state_entered_wbc_time_s_ = 0.0;
     locomotion_runtime_epoch_wbc_time_s_ = 0.0;
     smoothed_velocity_x_m_s_ = 0.0;
+    smoothed_velocity_y_m_s_ = 0.0;
+    smoothed_yaw_rate_rad_s_ = 0.0;
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -885,12 +1057,26 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
 
     // Ramp toward the FSM state's target velocity every tick (including
     // HOME/STAND, so it decays back to 0 smoothly instead of snapping - see
-    // kVelocityRampMps2's doc comment for why this matters).
+    // kVelocityRampMps2's doc comment for why this matters). Runs
+    // unconditionally for all three axes regardless of which axis (if any)
+    // the current fsm_state actually drives, so leaving e.g. STRAFE_LEFT for
+    // TURN_RIGHT ramps y back toward 0 while yaw-rate ramps up - no axis is
+    // ever left stuck at a stale nonzero value across a mode switch.
     const double target_velocity_x = fsm_state == MegadogFsmState::FORWARD    ? kWalkSpeedMps
                                       : fsm_state == MegadogFsmState::BACKWARD ? -kWalkSpeedMps
                                                                                 : 0.0;
+    const double target_velocity_y = fsm_state == MegadogFsmState::STRAFE_LEFT    ? kStrafeSpeedMps
+                                      : fsm_state == MegadogFsmState::STRAFE_RIGHT ? -kStrafeSpeedMps
+                                                                                    : 0.0;
+    const double target_yaw_rate = fsm_state == MegadogFsmState::TURN_LEFT    ? kTurnRateRadS
+                                    : fsm_state == MegadogFsmState::TURN_RIGHT ? -kTurnRateRadS
+                                                                                 : 0.0;
     const double max_delta = kVelocityRampMps2 * dt;
     smoothed_velocity_x_m_s_ += std::clamp(target_velocity_x - smoothed_velocity_x_m_s_, -max_delta, max_delta);
+    const double max_delta_y = kLateralVelocityRampMps2 * dt;
+    smoothed_velocity_y_m_s_ += std::clamp(target_velocity_y - smoothed_velocity_y_m_s_, -max_delta_y, max_delta_y);
+    const double max_delta_yaw = kYawRateRampRadS2 * dt;
+    smoothed_yaw_rate_rad_s_ += std::clamp(target_yaw_rate - smoothed_yaw_rate_rad_s_, -max_delta_yaw, max_delta_yaw);
 
     std::array<double, 12> effort{};
     bool ok = false;
@@ -936,15 +1122,46 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             case MegadogFsmState::TROT_IN_PLACE:
             case MegadogFsmState::FORWARD:
             case MegadogFsmState::BACKWARD:
+            case MegadogFsmState::STRAFE_LEFT:
+            case MegadogFsmState::STRAFE_RIGHT:
+            case MegadogFsmState::TURN_LEFT:
+            case MegadogFsmState::TURN_RIGHT:
                 // Match ultraDog/A1: all trot-family states share the same
-                // gait template. Switching between in-place and moving then
-                // only changes the ramped base velocity, avoiding a mid-stride
+                // gait template - gait.info's mode sequence only fixes which
+                // legs are in contact when, never where a foot goes, so it
+                // needs no per-direction variant (multi-agent research this
+                // session, cross-checked against qiayuanl/legged_control,
+                // unitree_guide, OCS2's own examples: none define a
+                // direction-specific gait template either). Switching between
+                // any of these states then only changes which axis of the
+                // ramped velocity is nonzero, avoiding a mid-stride
                 // gait-template rewrite that can feel like a periodic stutter.
                 command.gait_name = "trot";
                 command.base_velocity_x_m_s = smoothed_velocity_x_m_s_;
+                command.base_velocity_y_m_s = smoothed_velocity_y_m_s_;
+                command.base_yaw_rate_rad_s = smoothed_yaw_rate_rad_s_;
                 if (base_reference_latched_) {
-                    command.base_y_reference_m = latched_base_position_reference_m_[1];
-                    command.base_yaw_reference_rad = latched_base_yaw_reference_rad_;
+                    // Only hard-anchor an axis THIS state doesn't intend to
+                    // move on (gated on the discrete per-state target, not
+                    // the ramping smoothed value, to avoid float-equality
+                    // flicker mid-ramp). x is never anchored here (was
+                    // already true before strafe/turn existed) - FORWARD/
+                    // BACKWARD need it free-running, and setTargetTrajectories()
+                    // already free-runs x from the current base pose each
+                    // tick when base_x_reference_m is left non-finite. The
+                    // same free-run/anchor split now applies per-axis: y
+                    // stays anchored (no lateral drift) unless STRAFE_* is
+                    // actively driving it, and yaw stays anchored (no
+                    // unintended turning/heading drift) unless TURN_* is
+                    // actively driving it - this is what makes STRAFE_LEFT
+                    // genuine sideways translation with heading held fixed,
+                    // not a turn-then-walk.
+                    if (target_velocity_y == 0.0) {
+                        command.base_y_reference_m = latched_base_position_reference_m_[1];
+                    }
+                    if (target_yaw_rate == 0.0) {
+                        command.base_yaw_reference_rad = latched_base_yaw_reference_rad_;
+                    }
                 }
                 break;
             case MegadogFsmState::HOME:
@@ -988,6 +1205,19 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
                                       posture_torque;
                 effort[j] = clampJointTorque(j, torque);
             }
+            if (effort_hold_active_) {
+                // Ramp from the frozen hold value toward this tick's fresh
+                // torque instead of snapping to it in one tick - see
+                // kEffortBlendDurationS's doc comment above.
+                effort_blend_elapsed_s_ += dt;
+                const double alpha = smoothStep(effort_blend_elapsed_s_ / kEffortBlendDurationS);
+                for (std::size_t j = 0; j < jointNames().size(); ++j) {
+                    effort[j] = last_valid_effort_[j] + alpha * (effort[j] - last_valid_effort_[j]);
+                }
+                if (alpha >= 1.0) {
+                    effort_hold_active_ = false;
+                }
+            }
             last_valid_effort_ = effort;
             has_last_valid_effort_ = true;
             runtime_failure_reported_ = false;
@@ -999,6 +1229,11 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
                 runtime_failure_reported_ = true;
             }
             effort = has_last_valid_effort_ ? last_valid_effort_ : effort;
+            // Arms the blend above for whenever a fresh sample resumes -
+            // re-primed every tick of the hold so the blend always starts
+            // cleanly from elapsed=0 the instant the hold actually ends.
+            effort_hold_active_ = has_last_valid_effort_;
+            effort_blend_elapsed_s_ = 0.0;
         }
     }
 
@@ -1011,8 +1246,9 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         diagnostics_elapsed_s_ = 0.0;
         RCLCPP_INFO(
             get_node()->get_logger(),
-            "MegadogController: t=%.2f wbc_t=%.2f state=%s valid=%d base_src=%s imu_fresh=%d vx=%.3f eom=%.4f "
-            "base=[z %.3f yaw %.3f pitch %.3f roll %.3f vz %.3f wyaw %.3f wpitch %.3f wroll %.3f] "
+            "MegadogController: t=%.2f wbc_t=%.2f state=%s valid=%d base_src=%s imu_fresh=%d "
+            "cmd=[vx %.3f vy %.3f wz %.3f] eom=%.4f "
+            "base=[z %.3f yaw %.3f pitch %.3f roll %.3f vx %.3f vy %.3f vz %.3f wyaw %.3f wpitch %.3f wroll %.3f] "
             "HAA_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
             "HFE_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
             "KFE_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
@@ -1027,9 +1263,10 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             "KFE_eff=[LF %.2f LH %.2f RF %.2f RH %.2f]",
             elapsed_s_, wbc_time_s_, fsmStateName(fsm_state), ok && result.valid ? 1 : 0,
             base_fresh ? "gt" : (imu_fresh ? "imu" : "none"), imu_fresh ? 1 : 0,
-            smoothed_velocity_x_m_s_, result.eom_residual_norm,
+            smoothed_velocity_x_m_s_, smoothed_velocity_y_m_s_, smoothed_yaw_rate_rad_s_, result.eom_residual_norm,
             measurement.base_pos_m[2], measurement.base_euler_zyx_rad[0], measurement.base_euler_zyx_rad[1],
-            measurement.base_euler_zyx_rad[2], measurement.base_linear_vel_m_s[2],
+            measurement.base_euler_zyx_rad[2], measurement.base_linear_vel_m_s[0], measurement.base_linear_vel_m_s[1],
+            measurement.base_linear_vel_m_s[2],
             measurement.base_euler_zyx_rate_rad_s[0], measurement.base_euler_zyx_rate_rad_s[1],
             measurement.base_euler_zyx_rate_rad_s[2],
             measurement.joint_pos_rad[0], measurement.joint_pos_rad[3], measurement.joint_pos_rad[6],
