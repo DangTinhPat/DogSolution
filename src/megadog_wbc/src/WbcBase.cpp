@@ -329,10 +329,9 @@ Task WbcBase::formulateHaaJointPostureTask()
     const vector_t vJointDesired = vDesired_.tail(info_.actuatedDofNum);
 
     // Deliberately always full-weight, no per-leg contact gating (unlike
-    // formulateLegJointPostureTask() below) - gating was tried and made the
-    // measured peak worse, not better (see WbcBase.h's doc comment on
-    // haa_posture_dynamic_band_rad). Do not re-add without first
-    // understanding why gating helped leg_posture but not haa_posture.
+    // formulateLegJointPostureTask() below): HAA posture is a continuous
+    // stance-width anchor, while leg_posture has contact-aware blending for
+    // the pitch/knee joints.
     size_t row = 0;
     for (size_t joint = 0; joint < info_.actuatedDofNum; joint += 3) {
         const bool useConfiguredNominal = config_.haa_posture_nominal_rad.size() == numHaaJoints &&

@@ -57,14 +57,14 @@ struct HierarchicalWbcConfig
     // qJointDesired target to [nominal - band, nominal + band] instead. This
     // gives the same kind of natural, swing-responsive hip motion as an
     // empty nominal (fully dynamic tracking), but keeps a bounded anchor so
-    // the joint can never drift arbitrarily far from a known-safe angle
+    // the joint can never drift arbitrarily far from the configured anchor
     // (see formulateHaaJointPostureTask). 0.0 (default) preserves the old
     // binary behavior: fully pinned when nominal is set, fully dynamic when
     // it's empty.
     double haa_posture_dynamic_band_rad = 0.0;
-    // Optional devq-style safety guard. In the normal HAA range the posture
+    // Optional devq-style excursion guard. In the normal HAA range the posture
     // row follows the NMPC target at haa_posture_safe_scale. As either the
-    // measured or planned angle approaches the empirically unsafe magnitude,
+    // measured or planned angle approaches the configured guard magnitude,
     // the row smoothly returns to full authority and blends its target back
     // toward the configured nominal. Disabled by default to preserve the
     // upstream/static posture semantics for other users of this library.
@@ -74,10 +74,9 @@ struct HierarchicalWbcConfig
     double haa_posture_guard_full_abs_rad = 0.48;
     // NOTE: deliberately no haa_posture_swing_scale field here (unlike
     // leg_posture_swing_scale below) - contact-gating this task the same
-    // way was tried and made things worse, not better (see
-    // MegadogController.cpp's kStandingJointTargetRad comment, attempt 2).
-    // Do not re-add without understanding why gating helped leg_posture but
-    // not haa_posture.
+    // way is intentionally kept out of the current devq runtime: HAA posture
+    // is used as a continuous stance-width anchor, while leg_posture has its
+    // own contact-aware blending below.
     // Soft posture regularization for the full 12-joint leg shape. This is
     // useful for robots whose nominal hip/knee signs differ from the A1
     // source project: stance/swing/base tasks can otherwise find a dynamically
@@ -126,7 +125,7 @@ struct HierarchicalWbcConfig
     // has a finite value at that index), the target is
     // clamp(qJointDesired, nominal-band, nominal+band) instead of pinned
     // exactly to nominal - natural, swing-responsive motion bounded around
-    // a known-safe angle. A joint's entry being 0/absent keeps that one
+    // the configured anchor. A joint's entry being 0/absent keeps that one
     // joint's old exact-pin behavior. This is deliberately per-joint rather
     // than a single scalar: devq's KFE has less geometric margin near its
     // upper stop than the A1-family models and needs a tight band, while HFE

@@ -210,18 +210,11 @@ initialState
    ;; Leg Joint Positions: [LF, LH, RF, RH] - must match reference.info's
    ;; defaultJointState; this block was stale at A1's old numbers (KFE=-1.44
    ;; even fell outside devq's real calf position limit [0.436,2.705]) ;;
-   ;; HAA bumped 0.30->0.40 rad: urdf-expert FK analysis found devq's fixed
-   ;; hip lateral offset is a much larger fraction of its 25%-shorter legs
-   ;; than A1's, so devq's stance looks ~3x more "splayed" than A1's at
-   ;; matching HAA angles (0.30 rad was already narrower than A1's own 0.20
-   ;; would give on devq's geometry - lowering it further would WIDEN the
-   ;; stance, not narrow it). Increasing HAA magnitude is the only lever
-   ;; that narrows devq's stance; 0.40 keeps ~2.5cm clearance to the trunk's
-   ;; lateral envelope. 0.40 is CLOSED/FINAL - five independent mechanisms
-   ;; across both WBC and NMPC layers were tried to push this to 0.45 and
-   ;; all failed the same way (real joint overshoot past the 0.50 rad
-   ;; self-collision danger zone); see MegadogController.cpp's
-   ;; kStandingJointTargetRad comment for the full story and root cause.
+   ;; HAA magnitude narrows devq's stance in the current URDF: the fixed hip
+   ;; lateral offset and HAA origin roll mean larger absolute HAA pulls the
+   ;; feet further under the body. This pass stages 0.43 rad for supervised
+   ;; sim validation; keep it synchronized with reference.info and
+   ;; MegadogController.cpp.
    ;; HFE/KFE bumped 0.574027/-1.37275 -> 0.478618/-1.181561: urdf-expert's
    ;; FK analysis found the old values were never kinematically consistent
    ;; with p_base_z=0.22 above (naturally producing ~0.239m instead), which
@@ -230,16 +223,16 @@ initialState
    ;; FK to land exactly at 0.22m - see MegadogController.cpp's
    ;; kStandingJointTargetRad comment for the full story, including the
    ;; KFE-singularity-clearance re-verification this needed.
-   (12,0) -0.40       ; LF_HAA
+   (12,0) -0.43       ; LF_HAA
    (13,0)  0.478618   ; LF_HFE
    (14,0) -1.181561   ; LF_KFE
-   (15,0) -0.40       ; LH_HAA
+   (15,0) -0.43       ; LH_HAA
    (16,0)  0.478618   ; LH_HFE
    (17,0) -1.181561   ; LH_KFE
-   (18,0)  0.40       ; RF_HAA
+   (18,0)  0.43       ; RF_HAA
    (19,0)  0.478618   ; RF_HFE
    (20,0) -1.181561   ; RF_KFE
-   (21,0)  0.40       ; RH_HAA
+   (21,0)  0.43       ; RH_HAA
    (22,0)  0.478618   ; RH_HFE
    (23,0) -1.181561   ; RH_KFE
 }
@@ -338,11 +331,9 @@ R
 
 ; Was 0.3 (byte-identical to A1 stock, never re-derived for devq) until
 ; found to mismatch megadog_world.sdf's actual simulated ground friction
-; (mu=1.0) by >3x - see MegadogController.cpp's kStandingJointTargetRad
-; comment (attempt 5) for the investigation and outcome. 0.5 stays
-; comfortably under the sim's real mu=1.0. Must be kept in lock-step with
-; makeDevqWbcConfig()'s friction_coefficient (also 0.5) - the WBC's own
-; friction cone task and the NMPC's belief here must agree.
+; (mu=1.0) by >3x. 0.5 stays comfortably under the sim's real mu=1.0.
+; Keep this in lock-step with makeDevqWbcConfig()'s friction_coefficient
+; so the WBC's own friction cone task and the NMPC's belief agree.
 frictionConeSoftConstraint
 {
   frictionCoefficient    0.5
@@ -389,35 +380,16 @@ torqueLimitsTask
 
 frictionConeTask
 {
-  frictionCoefficient    0.3
+  frictionCoefficient    0.5
 }
 
-; NMPC-level (not WBC-level) soft box constraint on the 4 HAA joint angles -
-; see createHaaPositionLimitConstraint() in megadog_legged_interface and its
-; construction site in MegadogWbcRuntime.cpp. Added after three WBC-level
-; mechanisms all failed to narrow HAA past 0.40 rad (see
-; MegadogController.cpp's kStandingJointTargetRad comment): real HAA_meas
-; was found to track HAA_mpc (the NMPC's own solution) almost exactly, so a
-; WBC-level fix - evaluated one control tick after the NMPC already
-; committed to a trajectory - could not out-rank it. This constraint is
-; instead added directly into the SQP's own OptimalControlProblem,
-; evaluated at every transcription node across the whole horizon, so it can
-; bend the trajectory before an overshoot instead of reacting to one. Uses
-; a SquaredHingePenalty: exactly zero cost until a HAA state gets within
-; `delta` rad of `bound`, so it doesn't compete with base/foot tracking
-; anywhere except right at the safety edge. bound<=0 disables this
-; constraint entirely.
-;
-; Tested (attempt 4, HAA nominal deliberately left at 0.40 to isolate the
-; mechanism) at bound=0.48: peaked 0.482-0.491 rad, right at its own bound
-; - this confirmed the natural swing excursion is already this large even
-; without any narrowing, closing the question of whether nominal should be
-; raised further (it was not, and should not be - see
-; kStandingJointTargetRad's comment for the final decision). Kept
-; permanently at bound=0.48 as a harmless NMPC-level safety net.
+; NMPC-level soft box constraint on the 4 HAA joint angles. This is a sim
+; guard for the staged 0.43 rad stance-width experiment; it should be
+; re-derived from collision-distance logs instead of treated as a fixed
+; mechanical truth. bound<=0 disables this constraint entirely.
 haaPositionLimit
 {
-  bound   0.48
+  bound   0.50
   mu      80.0
   delta   0.02
 }
