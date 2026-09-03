@@ -492,6 +492,16 @@ Task WbcBase::formulateSwingLegTask()
     eeKinematics_->setPinocchioInterface(pinocchioInterfaceDesired_);
     std::vector<vector3_t> posDesired = eeKinematics_->getPosition(vector_t());
     std::vector<vector3_t> velDesired = eeKinematics_->getVelocity(vector_t(), vector_t());
+    const bool shapeSwingFootLateralTarget =
+        config_.swing_foot_lateral_nominal_y_m.size() == info_.numThreeDofContacts &&
+        config_.swing_foot_lateral_target_blend > 0.0;
+    const scalar_t swingFootLateralBlend = static_cast<scalar_t>(
+        std::clamp(config_.swing_foot_lateral_target_blend, 0.0, 1.0));
+    const matrix3_t rotationBaseDesiredToWorld =
+        getRotationMatrixFromZyxEulerAngles<scalar_t>(qDesired_.segment<3>(3));
+    const matrix3_t rotationWorldToBaseDesired = rotationBaseDesiredToWorld.transpose();
+    const vector3_t baseDesiredPositionWorld = qDesired_.head<3>();
+    const vector3_t baseDesiredLinearVelocityWorld = vDesired_.head<3>();
 
     matrix_t a(3 * (info_.numThreeDofContacts - numContacts_), numDecisionVars_);
     vector_t b(a.rows());
@@ -500,6 +510,22 @@ Task WbcBase::formulateSwingLegTask()
     size_t j = 0;
     for (size_t i = 0; i < info_.numThreeDofContacts; ++i) {
         if (!contactFlag_[i]) {
+            if (shapeSwingFootLateralTarget) {
+                const scalar_t nominalY = static_cast<scalar_t>(config_.swing_foot_lateral_nominal_y_m[i]);
+                if (std::isfinite(nominalY)) {
+                    vector3_t footRelativeDesired =
+                        rotationWorldToBaseDesired * (posDesired[i] - baseDesiredPositionWorld);
+                    footRelativeDesired.y() =
+                        (1.0 - swingFootLateralBlend) * footRelativeDesired.y() + swingFootLateralBlend * nominalY;
+                    posDesired[i] = baseDesiredPositionWorld + rotationBaseDesiredToWorld * footRelativeDesired;
+
+                    vector3_t footRelativeVelocityDesired =
+                        rotationWorldToBaseDesired * (velDesired[i] - baseDesiredLinearVelocityWorld);
+                    footRelativeVelocityDesired.y() *= (1.0 - swingFootLateralBlend);
+                    velDesired[i] =
+                        baseDesiredLinearVelocityWorld + rotationBaseDesiredToWorld * footRelativeVelocityDesired;
+                }
+            }
             vector3_t accel = config_.swing_kp * (posDesired[i] - posMeasured[i]) + config_.swing_kd * (velDesired[i] - velMeasured[i]);
             a.block(3 * j, 0, 3, info_.generalizedCoordinatesNum) = j_.block(3 * i, 0, 3, info_.generalizedCoordinatesNum);
             b.segment(3 * j, 3) = accel - dj_.block(3 * i, 0, 3, info_.generalizedCoordinatesNum) * vMeasured_;

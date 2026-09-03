@@ -61,6 +61,17 @@ public:
         megadog::hwbc::WbcBase::update(stateDesired, inputDesired, rbdStateMeasured, mode, period, time);
         return formulateLegJointPostureTask();
     }
+
+    megadog::hwbc::Task swingLegTask(const vector_t& stateDesired,
+                                     const vector_t& inputDesired,
+                                     const vector_t& rbdStateMeasured,
+                                     const size_t mode,
+                                     const scalar_t period,
+                                     const scalar_t time)
+    {
+        megadog::hwbc::WbcBase::update(stateDesired, inputDesired, rbdStateMeasured, mode, period, time);
+        return formulateSwingLegTask();
+    }
 };
 
 vector_t standStillRbdState(const vector_t& initState, const CentroidalModelInfo& info)
@@ -378,6 +389,32 @@ TEST(HierarchicalWbc, adaptiveHaaPostureIsSoftInSafeRangeAndFullNearGuard)
     task = wbc.haaJointPostureTask(desired, input, measured, ModeNumber::STANCE, 0.001, 20.0);
     EXPECT_NEAR(task.a_(0, 6), 1.0, 1e-12);
     EXPECT_NEAR(task.b_(0), 0.8, 1e-12);
+}
+
+TEST(HierarchicalWbc, swingFootLateralTargetShapesOnlySwingFeetInContactOrder)
+{
+    const auto interface = megadog_legged_interface::createInterface();
+    const auto& info = interface->getCentroidalModelInfo();
+    CentroidalModelPinocchioMapping mapping(info);
+    PinocchioEndEffectorKinematics eeKinematics(interface->getPinocchioInterface(), mapping,
+                                                interface->modelSettings().contactNames3DoF);
+
+    megadog::hwbc::HierarchicalWbcConfig config;
+    config.swing_kp = 10.0;
+    config.swing_kd = 0.0;
+    config.swing_foot_lateral_target_blend = 1.0;
+    config.swing_foot_lateral_nominal_y_m = {0.0, 0.0, 0.0, 0.0};
+    InspectableWbc wbc(interface->getPinocchioInterface(), info, eeKinematics, config);
+
+    const vector_t state = interface->getInitialState();
+    const vector_t measured = standStillRbdState(state, info);
+    const vector_t input = vector_t::Zero(info.inputDim);
+    const auto task = wbc.swingLegTask(state, input, measured, ModeNumber::LF_RH, 0.001, 20.0);
+
+    ASSERT_EQ(task.a_.rows(), 6);
+    ASSERT_EQ(task.b_.rows(), 6);
+    EXPECT_GT(task.b_(1), 0.0);  // RF swing foot starts on robot-right, so center is +Y.
+    EXPECT_LT(task.b_(4), 0.0);  // LH swing foot starts on robot-left, so center is -Y.
 }
 
 int main(int argc, char** argv)

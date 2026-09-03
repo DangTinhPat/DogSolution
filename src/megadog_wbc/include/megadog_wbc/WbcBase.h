@@ -72,6 +72,13 @@ struct HierarchicalWbcConfig
     double haa_posture_safe_scale = 1.0;
     double haa_posture_guard_start_abs_rad = 0.44;
     double haa_posture_guard_full_abs_rad = 0.48;
+    // Optional swing-foot lateral target shaping in contact order
+    // [LF, RF, LH, RH]. This modifies formulateSwingLegTask()'s own Cartesian
+    // target before the swing task is built, instead of adding a second foot-y
+    // task that would compete with swing XYZ tracking. Values are body-frame
+    // lateral foot offsets; positive is robot-left.
+    double swing_foot_lateral_target_blend = 0.0;
+    std::vector<double> swing_foot_lateral_nominal_y_m;
     // NOTE: deliberately no haa_posture_swing_scale field here (unlike
     // leg_posture_swing_scale below) - contact-gating this task the same
     // way is intentionally kept out of the current devq runtime: HAA posture

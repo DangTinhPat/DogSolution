@@ -691,6 +691,29 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
     const vector_t hb = data.nle.topRows(6);
     const matrix_t JbT = jStacked.transpose().topRows(6);
     const vector_t residual = Mb * vDotAll - JbT * forces + hb;
+    const contact_flag_t contactFlags = modeNumber2StanceLeg(plannedMode);
+
+    const matrix3_t rotationBaseToWorld = getRotationMatrixFromZyxEulerAngles<scalar_t>(qMeasured.segment<3>(3));
+    const vector3_t baseLateralAxisWorld = rotationBaseToWorld.col(1);
+    const vector3_t basePositionWorld = qMeasured.head<3>();
+    for (size_t i = 0; i < info.numThreeDofContacts && i < result.foot_lateral_y_m.size(); ++i) {
+        const vector3_t footPositionWorld = data.oMf[info.endEffectorFrameIndices[i]].translation();
+        result.foot_lateral_y_m[i] = baseLateralAxisWorld.dot(footPositionWorld - basePositionWorld);
+    }
+    result.front_width_m = result.foot_lateral_y_m[0] - result.foot_lateral_y_m[1];
+    result.hind_width_m = result.foot_lateral_y_m[2] - result.foot_lateral_y_m[3];
+    result.width_mean_m = 0.5 * (result.front_width_m + result.hind_width_m);
+    result.width_skew_m = result.front_width_m - result.hind_width_m;
+    result.left_fore_hind_skew_m = result.foot_lateral_y_m[0] - result.foot_lateral_y_m[2];
+    result.right_fore_hind_skew_m = result.foot_lateral_y_m[1] - result.foot_lateral_y_m[3];
+    const size_t stanceCount =
+        static_cast<size_t>(std::count(contactFlags.begin(), contactFlags.end(), true));
+    result.active_diagonal_width_m = std::numeric_limits<double>::quiet_NaN();
+    if (stanceCount == 2 && contactFlags[0] && contactFlags[3]) {
+        result.active_diagonal_width_m = result.foot_lateral_y_m[0] - result.foot_lateral_y_m[3];
+    } else if (stanceCount == 2 && contactFlags[1] && contactFlags[2]) {
+        result.active_diagonal_width_m = result.foot_lateral_y_m[2] - result.foot_lateral_y_m[1];
+    }
 
     for (size_t i = 0; i < info.actuatedDofNum && i < 12; ++i) {
         result.torque_nm[i] = torque(static_cast<long>(i));
@@ -703,7 +726,6 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
     if (visualize_enabled_) {
         publishVisualization(time_s, ros_time, estimatedMeasurement);
 
-        const contact_flag_t contactFlags = modeNumber2StanceLeg(plannedMode);
         std::vector<vector3_t> feetPositions(info.numThreeDofContacts);
         std::vector<vector3_t> feetForces(info.numThreeDofContacts);
         for (size_t i = 0; i < info.numThreeDofContacts; ++i) {

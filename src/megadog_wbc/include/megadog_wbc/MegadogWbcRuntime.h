@@ -46,6 +46,18 @@ struct MegadogWbcResult
     // test_hierarchical_wbc.cpp uses - a nonzero residual means the WBC's own
     // hard constraint slipped, distinct from "OCS2 gave us a policy at all".
     double eom_residual_norm = 0.0;
+    // Base-frame lateral foot offsets in contact order [LF, RF, LH, RH],
+    // plus derived stance-width metrics. These are diagnostics first: they
+    // make forward-trot footprint changes measurable before any stronger
+    // swing-target shaping is attempted.
+    std::array<double, 4> foot_lateral_y_m{};
+    double front_width_m = 0.0;
+    double hind_width_m = 0.0;
+    double width_mean_m = 0.0;
+    double width_skew_m = 0.0;
+    double left_fore_hind_skew_m = 0.0;
+    double right_fore_hind_skew_m = 0.0;
+    double active_diagonal_width_m = std::numeric_limits<double>::quiet_NaN();
     bool valid = false;
 };
 

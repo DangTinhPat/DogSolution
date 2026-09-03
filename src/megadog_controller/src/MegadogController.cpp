@@ -267,17 +267,18 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     //
     // haa_posture_dynamic_band_rad below lets this task track the WBC's own
     // moving qJointDesired within +-band of the nominal, instead of pinning
-    // it exactly - this is the "linh hoat" (flexible) motion like
-    // ultraDog's dynamic target, but bounded so the joint can never drift
-    // arbitrarily far from the nominal anchor. With the new 0.43 rad nominal,
-    // use a narrower 0.03 rad band so the posture target remains staged
-    // around the updated stance-width experiment.
-    config.haa_posture_dynamic_band_rad = 0.03;
+    // it exactly. Keep the band tight enough that forward trot cannot let
+    // HAA relax back toward a wider footprint for long stretches.
+    config.haa_posture_dynamic_band_rad = 0.006;
     config.haa_posture_nominal_rad = {-0.43, -0.43, 0.43, 0.43};
     config.haa_posture_adaptive_guard_enabled = false;
     config.haa_posture_safe_scale = 1.0;
     config.haa_posture_guard_start_abs_rad = 0.47;
     config.haa_posture_guard_full_abs_rad = 0.50;
+    // Experimental hook for reshaping only the SWING foot's own Cartesian
+    // target; kept disabled until a supervised A/B shows a clear width win.
+    config.swing_foot_lateral_target_blend = 0.0;
+    config.swing_foot_lateral_nominal_y_m = {0.112, -0.112, 0.112, -0.112};
     // leg_posture_task_weight must stay > 0 (see the long comment above) -
     // this is the one non-negotiable devq-specific WBC gain found this
     // session, everything else here is otherwise-standard devq tuning
@@ -1204,6 +1205,8 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             "MegadogController: t=%.2f wbc_t=%.2f state=%s valid=%d base_src=%s imu_fresh=%d "
             "cmd=[vx %.3f vy %.3f wz %.3f] eom=%.4f "
             "base=[z %.3f yaw %.3f pitch %.3f roll %.3f vx %.3f vy %.3f vz %.3f wyaw %.3f wpitch %.3f wroll %.3f] "
+            "feet_y_body=[LF %.3f RF %.3f LH %.3f RH %.3f] "
+            "track_width=[front %.3f hind %.3f mean %.3f skew %.3f diag %.3f left_skew %.3f right_skew %.3f] "
             "HAA_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
             "HFE_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
             "KFE_meas=[LF %.3f LH %.3f RF %.3f RH %.3f] "
@@ -1224,6 +1227,10 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             measurement.base_linear_vel_m_s[2],
             measurement.base_euler_zyx_rate_rad_s[0], measurement.base_euler_zyx_rate_rad_s[1],
             measurement.base_euler_zyx_rate_rad_s[2],
+            result.foot_lateral_y_m[0], result.foot_lateral_y_m[1], result.foot_lateral_y_m[2],
+            result.foot_lateral_y_m[3],
+            result.front_width_m, result.hind_width_m, result.width_mean_m, result.width_skew_m,
+            result.active_diagonal_width_m, result.left_fore_hind_skew_m, result.right_fore_hind_skew_m,
             measurement.joint_pos_rad[0], measurement.joint_pos_rad[3], measurement.joint_pos_rad[6],
             measurement.joint_pos_rad[9],
             measurement.joint_pos_rad[1], measurement.joint_pos_rad[4], measurement.joint_pos_rad[7],
