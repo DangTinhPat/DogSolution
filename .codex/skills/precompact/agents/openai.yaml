@@ -1,0 +1,7 @@
+interface:
+  display_name: "megaDog Precompact"
+  short_description: "Snapshot current repo context before compaction"
+  default_prompt: "Use $precompact to write an accurate CONTEXT.md snapshot for this megaDog session before context is compacted."
+policy:
+  allow_implicit_invocation: false
+

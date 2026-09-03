@@ -1,5 +1,6 @@
 #include "imu_kalman_filter/imu_kalman.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -39,6 +40,42 @@ std::string vector_string(const Vector3 & value)
   stream << value.x << "," << value.y << "," << value.z;
   return stream.str();
 }
+
+bool finite_quaternion(const sensor_msgs::msg::Imu & message)
+{
+  const auto & q = message.orientation;
+  const double norm = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+  return std::isfinite(q.w) && std::isfinite(q.x) && std::isfinite(q.y) &&
+         std::isfinite(q.z) && norm > 1e-9;
+}
+
+Estimate estimate_from_sensor_orientation(const sensor_msgs::msg::Imu & message)
+{
+  const auto & q = message.orientation;
+  const double norm = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+  const double w = q.w / norm;
+  const double x = q.x / norm;
+  const double y = q.y / norm;
+  const double z = q.z / norm;
+
+  Estimate estimate;
+  estimate.roll = std::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
+  estimate.pitch = std::asin(std::clamp(2.0 * (w * y - z * x), -1.0, 1.0));
+  estimate.yaw = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
+  estimate.linear_acceleration = {
+    message.linear_acceleration.x,
+    message.linear_acceleration.y,
+    message.linear_acceleration.z,
+  };
+  estimate.angular_velocity = {
+    message.angular_velocity.x,
+    message.angular_velocity.y,
+    message.angular_velocity.z,
+  };
+  estimate.roll_variance = message.orientation_covariance[0];
+  estimate.pitch_variance = message.orientation_covariance[4];
+  return estimate;
+}
 }  // namespace
 
 class ImuKalmanNode : public rclcpp::Node
@@ -54,6 +91,7 @@ public:
     frame_id_ = declare_parameter<std::string>("frame_id", "imu_link");
     stale_timeout_seconds_ = declare_parameter<double>("stale_timeout_seconds", 0.25);
     yaw_variance_ = declare_parameter<double>("yaw_variance", 1000.0);
+    use_sensor_orientation_ = declare_parameter<bool>("use_sensor_orientation", false);
 
     FilterConfig config;
     const auto axis_map = declare_parameter<std::vector<int64_t>>(
@@ -151,10 +189,17 @@ public:
 
     diagnostics_timer_ = create_wall_timer(
       std::chrono::seconds(1), std::bind(&ImuKalmanNode::publish_diagnostics, this));
-    RCLCPP_INFO(
-      get_logger(),
-      "Kalman IMU: source=%s, output=%s. Keep robot stationary for %zu samples.",
-      input_source_.c_str(), output_topic_.c_str(), config.calibration_samples);
+    if (use_sensor_orientation_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "IMU: source=%s, output=%s, using sensor orientation.",
+        input_source_.c_str(), output_topic_.c_str());
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "Kalman IMU: source=%s, output=%s. Keep robot stationary for %zu samples.",
+        input_source_.c_str(), output_topic_.c_str(), config.calibration_samples);
+    }
   }
 
 private:
@@ -199,6 +244,11 @@ private:
   void sensor_callback(const sensor_msgs::msg::Imu::SharedPtr message)
   {
     mark_received();
+    if (use_sensor_orientation_) {
+      publish_sensor_orientation(*message);
+      return;
+    }
+
     ImuSample sample;
     sample.linear_acceleration = {
       message->linear_acceleration.x,
@@ -216,6 +266,26 @@ private:
     }
     sample.timestamp_seconds = input_stamp.seconds();
     process_sample(sample, input_stamp);
+  }
+
+  void publish_sensor_orientation(const sensor_msgs::msg::Imu & input)
+  {
+    if (!finite_quaternion(input)) {
+      state_ = "invalid_orientation";
+      ++rejected_samples_;
+      return;
+    }
+
+    sensor_msgs::msg::Imu output = input;
+    if (rclcpp::Time(output.header.stamp).nanoseconds() == 0) {
+      output.header.stamp = now();
+    }
+    output.header.frame_id = frame_id_;
+    last_estimate_ = estimate_from_sensor_orientation(output);
+    have_estimate_ = true;
+    state_ = "ready_sensor_orientation";
+    ++published_samples_;
+    imu_publisher_->publish(output);
   }
 
   void mark_received()
@@ -311,10 +381,12 @@ private:
     } else if (stale) {
       status.level = DiagnosticStatus::ERROR;
       status.message = "IMU input is stale";
-    } else if (state_ == "sensor_error" || state_ == "invalid_sample") {
+    } else if (
+      state_ == "sensor_error" || state_ == "invalid_sample" || state_ == "invalid_orientation")
+    {
       status.level = DiagnosticStatus::ERROR;
       status.message = "IMU reported an invalid sample";
-    } else if (!filter_->calibrated()) {
+    } else if (!use_sensor_orientation_ && !filter_->calibrated()) {
       status.level = DiagnosticStatus::WARN;
       status.message = (state_ == "calibration_motion") ?
         "Keep robot stationary; calibration restarted" : "Calibrating gyro bias";
@@ -323,10 +395,13 @@ private:
       status.message = "Rejected IMU sample with invalid delta-time";
     } else {
       status.level = DiagnosticStatus::OK;
-      status.message = "IMU Kalman filter healthy";
+      status.message = use_sensor_orientation_ ?
+        "IMU sensor orientation passthrough healthy" : "IMU Kalman filter healthy";
     }
 
     status.values.push_back(key_value("input_source", input_source_));
+    status.values.push_back(key_value(
+      "use_sensor_orientation", use_sensor_orientation_ ? "true" : "false"));
     status.values.push_back(key_value(
       "sensor_to_body_rpy_rad", vector_string(sensor_to_body_rpy_rad_)));
     status.values.push_back(key_value("accel_scale", vector_string(accel_scale_)));
@@ -361,6 +436,7 @@ private:
   double yaw_variance_{1000.0};
   double accel_covariance_{0.25};
   double gyro_covariance_{0.01};
+  bool use_sensor_orientation_{false};
   Vector3 sensor_to_body_rpy_rad_;
   Vector3 accel_scale_{1.0, 1.0, 1.0};
   std::size_t calibration_target_{0U};

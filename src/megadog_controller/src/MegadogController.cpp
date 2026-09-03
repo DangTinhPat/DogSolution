@@ -39,7 +39,7 @@ constexpr double kHaaTorqueLimitNm = 80.0;
 // targetDisplacementVelocity/targetRotationVelocity. kWalkSpeedMps is not
 // actually bounded by anything in reference.info - it's simply the
 // deliberately-chosen forward/backward walking speed.
-constexpr double kWalkSpeedMps = 0.18;
+constexpr double kWalkSpeedMps = 0.12;
 // Max |d(velocity)/dt| applied to the FSM's target velocity before it reaches
 // MegadogWbcCommand::base_velocity_x_m_s - see update()'s ramp toward
 // target_velocity_x. Without this, switching TROT_IN_PLACE -> FORWARD (or the
@@ -59,7 +59,7 @@ constexpr double kWalkSpeedMps = 0.18;
 // Bock & Schlöder 2005's RTI theory - a reference discontinuity is absorbed
 // gradually over several solves, not immediately) - so every commanded axis
 // genuinely needs its own explicit ramp, this is not just a cosmetic nicety.
-constexpr double kVelocityRampMps2 = 0.8;
+constexpr double kVelocityRampMps2 = 0.4;
 // Lateral (crab-walk) and yaw-rate (turning) locomotion - added after
 // forward/backward, deliberately conservative starting values since this
 // exercises a fundamentally different (frontal-plane, for lateral) balance
@@ -200,7 +200,7 @@ constexpr double kEffortBlendDurationS = 0.05;
 // solved via FK (Newton iteration, holding foot x/y fixed) to land
 // exactly at 0.22000m for all 4 legs, so STAND and TROT should now settle
 // at consistent heights. Lateral foot spread barely changes (+0.75mm).
-// KFE's static clearance to the calf_position_max=0.0 singularity shrinks
+// KFE's static clearance to the calf_position_max=0.0 upper stop shrinks
 // from 1.373 to 1.182 rad (~14%) - still far from the ~0.80-0.87 rad
 // band-edges documented as unsafe in this session's earlier failed
 // dynamic-band experiments (see leg_posture_dynamic_band_rad's history
@@ -260,7 +260,7 @@ double clampJointTorque(const std::size_t joint_index, const double torque)
 // base_angular_kp/kd to ultraDog's values, made TROT_IN_PLACE fall over
 // within ~8-10s in sim (leg_posture's fixed nominal turned out to be the
 // only thing anchoring the (HFE,KFE) null-space away from devq's
-// calf_position_max=0.0 singularity - losing it removed that protection).
+// calf_position_max=0.0 upper stop - losing it removed that protection).
 // A narrower follow-up tried the dynamic target on HAA alone (no
 // kinematic-singularity risk there), with leg_posture/swing/base gains
 // left untouched, and knocked haa_posture_kp/kd/weight down from
@@ -344,6 +344,10 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     // comment above) the final, closed value - do not narrow further.
     config.haa_posture_dynamic_band_rad = 0.08;
     config.haa_posture_nominal_rad = {-0.40, -0.40, 0.40, 0.40};
+    config.haa_posture_adaptive_guard_enabled = false;
+    config.haa_posture_safe_scale = 1.0;
+    config.haa_posture_guard_start_abs_rad = 0.44;
+    config.haa_posture_guard_full_abs_rad = 0.48;
     // leg_posture_task_weight must stay > 0 (see the long comment above) -
     // this is the one non-negotiable devq-specific WBC gain found this
     // session, everything else here is otherwise-standard devq tuning
@@ -357,12 +361,18 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
          0.40, 0.478618, -1.181561,
          0.40, 0.478618, -1.181561,
     };
+    config.leg_posture_adaptive_guard_enabled = true;
+    config.leg_posture_stance_scale = 1.0;
+    config.leg_posture_stance_nmpc_blend = 0.25;
+    config.leg_posture_contact_blend_seconds = 0.05;
+    config.leg_posture_kfe_guard_start_rad = -0.70;
+    config.leg_posture_kfe_guard_full_rad = -0.45;
     // A same-session experiment tried bounded-dynamic bands on HFE/KFE too
     // (HFE 0.40, KFE 0.50 rad around nominal, FK-derived to leave 0.873 rad
-    // clear of the calf_position_max=0.0 singularity) - STAND was fully
+    // clear of the calf_position_max=0.0 upper stop) - STAND was fully
     // stable for 114s, but TROT_IN_PLACE was NOT: KFE breached the intended
     // band within 14s (measured -0.817, past the -0.87275 edge) and by
-    // ~184s in, KFE hit exactly 0.0 - the singularity itself - causing a
+    // ~184s in, KFE hit exactly 0.0 - the physical upper stop - causing a
     // full tumble (roll spiked to 1.31 rad, torque saturated). Root cause
     // (confirmed by research this session comparing against upstream
     // qiayuanl/legged_control and real A1/Go1/Aliengo URDFs): the band only
@@ -502,11 +512,12 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     // formulateSwingLegTask() already fully determines its trajectory and
     // posture only adds friction) rather than a single global QP-tier
     // choice - a real, substantial follow-up, not attempted here.
-    // leg_posture stays fully pinned (matches the config validated clean
-    // multiple times this session).
+    // The legacy dynamic-band path stays disabled. The adaptive path above
+    // now provides a phase-continuous partial nominal anchor instead.
     config.leg_posture_dynamic_band_rad.clear();
     config.leg_torque_limits_nm = {80.0, 80.0, 80.0};
-    // No KFE override - KFE is fully pinned above, doesn't need it.
+    // No fixed KFE override; the adaptive guard raises nominal authority
+    // before the physical upper stop instead.
     // This mechanism was also tried on HAA (hard bound at +-0.48 rad,
     // attempt 3 in kStandingJointTargetRad's comment above) - failed
     // there (unlike KFE, where it held) because the NMPC itself, not the
@@ -834,6 +845,7 @@ controller_interface::CallbackReturn MegadogController::on_activate(const rclcpp
     wbc_time_s_ = 0.0;
     diagnostics_elapsed_s_ = 0.0;
     runtime_failure_reported_ = false;
+    time_jump_reported_ = false;
     // Always start at rest - see MegadogFsmState::HOME's doc comment. A
     // previous activation's state (if any) is deliberately not preserved.
     fsm_state_.store(static_cast<int>(MegadogFsmState::HOME), std::memory_order_relaxed);
@@ -872,6 +884,27 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
         }
         return controller_interface::return_type::OK;
     }
+    constexpr double kMaxControllerPeriodS = 0.05;
+    if (dt > kMaxControllerPeriodS) {
+        if (!time_jump_reported_) {
+            RCLCPP_WARN(get_node()->get_logger(),
+                        "MegadogController: abnormal control period %.6fs; holding effort and resetting WBC/MPC time state",
+                        dt);
+            time_jump_reported_ = true;
+        }
+        if (runtime_) {
+            runtime_->beginNewLocomotionSegment();
+        }
+        last_control_base_sample_valid_ = false;
+        filtered_base_linear_velocity_m_s_ = {};
+        filtered_base_euler_zyx_rate_rad_s_ = {};
+        const auto held_effort = has_last_valid_effort_ ? last_valid_effort_ : std::array<double, 12>{};
+        for (std::size_t j = 0; j < jointNames().size(); ++j) {
+            std::ignore = command_interfaces_[j].set_value(held_effort[j]);
+        }
+        return controller_interface::return_type::OK;
+    }
+    time_jump_reported_ = false;
     elapsed_s_ += dt;
     if (start_time_s_ < 0.0) {
         start_time_s_ = 0.0;
@@ -1126,16 +1159,10 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
             case MegadogFsmState::STRAFE_RIGHT:
             case MegadogFsmState::TURN_LEFT:
             case MegadogFsmState::TURN_RIGHT:
-                // Match ultraDog/A1: all trot-family states share the same
-                // gait template - gait.info's mode sequence only fixes which
-                // legs are in contact when, never where a foot goes, so it
-                // needs no per-direction variant (multi-agent research this
-                // session, cross-checked against qiayuanl/legged_control,
-                // unitree_guide, OCS2's own examples: none define a
-                // direction-specific gait template either). Switching between
-                // any of these states then only changes which axis of the
-                // ramped velocity is nonzero, avoiding a mid-stride
-                // gait-template rewrite that can feel like a periodic stutter.
+                // Keep all trot-family states on the same phase template.
+                // Forward/backward stability is handled by reducing the
+                // commanded speed/ramp below the in-place gait's kinematic
+                // comfort limit, not by changing phase timing mid-family.
                 command.gait_name = "trot";
                 command.base_velocity_x_m_s = smoothed_velocity_x_m_s_;
                 command.base_velocity_y_m_s = smoothed_velocity_y_m_s_;

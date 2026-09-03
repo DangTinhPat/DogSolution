@@ -21,7 +21,15 @@ Thumbs.db
 
 # Claude Code / Codex local configuration
 .claude/
-.codex/
+.codex/*
+!.codex/AGENTS.md
+!.codex/agents/
+!.codex/agents/*.md
+!.codex/skills/
+!.codex/skills/*/
+!.codex/skills/*/SKILL.md
+!.codex/skills/*/agents/
+!.codex/skills/*/agents/openai.yaml
 .agents/
 AGENTS.md
 

@@ -183,6 +183,7 @@ private:
     double wbc_time_s_ = 0.0;
     double diagnostics_elapsed_s_ = 0.0;
     bool runtime_failure_reported_ = false;
+    bool time_jump_reported_ = false;
 };
 
 }  // namespace megadog_controller

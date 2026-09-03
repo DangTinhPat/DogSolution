@@ -2,9 +2,10 @@
 and megadog_controller (OCS2 SqpMpc + HierarchicalWbc) active, and optionally
 an RViz view of the same live simulation (RobotModel/TF plus megadog_wbc's
 OCS2 desired/optimized trajectory and contact markers - see megadog.rviz).
-Simulation now runs the same IMU Kalman path as real hardware for base
-attitude: Gazebo publishes /imu/sim_raw, imu_kalman_filter outputs /imu/data,
-and megadog_controller feeds that attitude into WBC/NMPC.
+Simulation keeps the same controller-facing /imu/data topic as real hardware:
+Gazebo publishes /imu/sim_raw, imu_kalman_filter passes through Gazebo's
+sensor orientation in sim, and megadog_controller feeds that attitude into
+WBC/NMPC. Real hardware still uses the compact IMU input plus Kalman path.
 """
 
 import os
@@ -149,6 +150,7 @@ def generate_launch_description():
             'sensor_topic': '/imu/sim_raw',
             'output_topic': '/imu/data',
             'frame_id': 'base_imu',
+            'use_sensor_orientation': True,
             'use_sim_time': use_sim_time,
         }],
     )

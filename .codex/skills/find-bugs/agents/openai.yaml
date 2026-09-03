@@ -1,0 +1,5 @@
+interface:
+  display_name: "megaDog Find Bugs"
+  short_description: "Root-cause bugs in megaDog control, ROS 2, and firmware paths"
+  default_prompt: "Use $find-bugs to debug the reported megaDog symptom systematically, tracing the real data path before proposing fixes."
+

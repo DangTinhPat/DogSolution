@@ -16,6 +16,7 @@ PATTERNS=(
   "gz sim"
   "ros_gz_sim/create"
   "ros_gz_bridge/parameter_bridge"
+  "imu_kalman_filter/imu_kalman_node"
   "robot_state_publisher"
   "ros2_control_node"
 )
@@ -46,4 +47,4 @@ for pattern in "${PATTERNS[@]}"; do
 done
 
 echo "Done. Remaining matches (should be empty):"
-pgrep -af "gz sim|ros2 launch megadog_description|robot_state_publisher|parameter_bridge|ros2_control_node" || echo "  (none)"
+pgrep -af "gz sim|ros2 launch megadog_description|robot_state_publisher|parameter_bridge|imu_kalman_node|ros2_control_node" || echo "  (none)"

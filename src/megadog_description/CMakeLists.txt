@@ -6,6 +6,8 @@ find_package(ament_cmake REQUIRED)
 install(
   DIRECTORY urdf meshes launch config worlds rviz
   DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
 )
 
 install(

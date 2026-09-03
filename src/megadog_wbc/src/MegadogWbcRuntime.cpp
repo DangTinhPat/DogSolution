@@ -301,21 +301,22 @@ bool MegadogWbcRuntime::setGaitTemplateIfNeeded(const std::string& gait_name, co
 {
     const std::string requested = gait_name.empty() ? std::string("stance") : gait_name;
     const scalar_t horizon = interface_->mpcSettings().timeHorizon_;
-    // Re-inserting only on a gait *name* change (the old condition here) left
-    // the gait schedule's mode sequence valid only up to the insertion
-    // time + 4*horizon (~4s at this task.info's timeHorizon=1.0s) - a gait
-    // held longer than that without ever changing name (e.g. FORWARD left
-    // running) ran the switched-model reference manager's GaitSchedule out
-    // of defined modes, and ocs2::ModeSchedule::modeAtTime() querying past
-    // the end segfaulted instead of erroring. Refresh whenever time_s gets
-    // within one horizon of running out, regardless of whether the name
-    // changed, so a long-held gait's window keeps sliding forward.
-    if (requested == active_gait_name_ && time_s + horizon < gait_schedule_valid_until_s_) {
-        return true;
-    }
     const auto& gaitSchedule = interface_->getSwitchedModelReferenceManagerPtr()->getGaitSchedule();
     const bool is_actual_gait_change = requested != active_gait_name_;
     if (!is_actual_gait_change) {
+        // The MPC thread normally extends GaitSchedule every solve via
+        // SwitchedModelReferenceManager::modifyReferences(). Trust that
+        // mutex-protected live tail first; the old control-thread-only
+        // gait_schedule_valid_until_s_ caused a redundant same-gait
+        // getModeSchedule() every ~3s, often exactly at a trot phase switch.
+        const ModeSchedule currentSchedule = gaitSchedule->getCurrentModeSchedule();
+        const scalar_t currentValidUntil =
+            currentSchedule.eventTimes.empty() ? -std::numeric_limits<scalar_t>::infinity() : currentSchedule.eventTimes.back();
+        if (time_s + horizon < currentValidUntil) {
+            gait_schedule_valid_until_s_ = currentValidUntil;
+            return true;
+        }
+
         // Same-gait "keepalive" refresh (not a gait change) - just the schedule's own
         // valid-until horizon running low on a long-held gait (e.g. FORWARD/TROT_IN_PLACE
         // left running for a while). Two separate bugs used to live here, both traced to
@@ -361,6 +362,7 @@ void MegadogWbcRuntime::setTargetTrajectories(const double time_s, const vector_
     const auto& info = interface_->getCentroidalModelInfo();
     const vector_t defaultJointState = interface_->getInitialState().tail(info.actuatedDofNum);
     const scalar_t timeToTarget = std::max<scalar_t>(0.5, interface_->mpcSettings().timeHorizon_);
+    const scalar_t translationLookahead = std::min<scalar_t>(timeToTarget, 0.5);
 
     vector_t baseCurrentPose = observation_state.segment(6, 6);
     if (std::isfinite(command.com_height_m) && command.com_height_m > 0.02) {
@@ -377,11 +379,11 @@ void MegadogWbcRuntime::setTargetTrajectories(const double time_s, const vector_
     vector_t baseTargetPose(6);
     baseTargetPose = baseCurrentPose;
     baseTargetPose(0) = std::isfinite(command.base_x_reference_m)
-        ? command.base_x_reference_m + commandVelocityWorld(0) * timeToTarget
-        : baseCurrentPose(0) + commandVelocityWorld(0) * timeToTarget;
+        ? command.base_x_reference_m + commandVelocityWorld(0) * translationLookahead
+        : baseCurrentPose(0) + commandVelocityWorld(0) * translationLookahead;
     baseTargetPose(1) = std::isfinite(command.base_y_reference_m)
-        ? command.base_y_reference_m + commandVelocityWorld(1) * timeToTarget
-        : baseCurrentPose(1) + commandVelocityWorld(1) * timeToTarget;
+        ? command.base_y_reference_m + commandVelocityWorld(1) * translationLookahead
+        : baseCurrentPose(1) + commandVelocityWorld(1) * translationLookahead;
     baseTargetPose(2) =
         std::isfinite(command.com_height_m) && command.com_height_m > 0.02 ? command.com_height_m : baseCurrentPose(2);
     const scalar_t yawReference = std::isfinite(command.base_yaw_reference_rad)
@@ -395,7 +397,7 @@ void MegadogWbcRuntime::setTargetTrajectories(const double time_s, const vector_
     vector_t finalState = vector_t::Zero(info.stateDim);
     startState.segment(6, 6) = baseCurrentPose;
     finalState.segment(6, 6) = baseTargetPose;
-    startState.tail(info.actuatedDofNum) = centroidal_model::getJointAngles(observation_state, info);
+    startState.tail(info.actuatedDofNum) = defaultJointState;
     finalState.tail(info.actuatedDofNum) = defaultJointState;
     startState.head<3>() = commandVelocityWorld;
     finalState.head<3>() = commandVelocityWorld;
@@ -602,8 +604,19 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
                 mpc_reset_request_advance_count_ + kMpcResetSettleAdvances) {
                 return false;
             }
-            mpc_awaiting_fresh_policy_ = false;
         }
+
+        const auto& activePolicy = mrt_->getPolicy();
+        if (!activePolicy.controllerPtr_ || activePolicy.timeTrajectory_.empty() || activePolicy.stateTrajectory_.empty()) {
+            return false;
+        }
+        const scalar_t policyModeQueryTime =
+            std::clamp(observation.time, activePolicy.timeTrajectory_.front(), activePolicy.timeTrajectory_.back());
+        const size_t activePolicyMode = safeModeAtTimeOrStance(activePolicy.modeSchedule_, policyModeQueryTime);
+        if (activePolicyMode != observation.mode) {
+            return false;
+        }
+        mpc_awaiting_fresh_policy_ = false;
 
         try {
             if (!evaluatePolicyWithoutModeAtTime(*mrt_, observation.time, observation.state, optimizedState, optimizedInput,

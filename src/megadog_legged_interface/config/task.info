@@ -67,7 +67,7 @@ swing_trajectory_config
   ; second, independent contributor to the same symptom - see that file's
   ; doc comment.
   touchDownVelocity            -0.10
-  swingHeight                   0.05  ; 5 cm clearance for a lower, A1-like swing arc on megaDog
+  swingHeight                   0.045 ; Lower clearance for megaDog's shorter 0.30 m legs; reduces forward-trot leg lift energy.
   swingTimeScale                0.15
 }
 
@@ -260,7 +260,7 @@ Q
   ;; Base Pose: [position, orientation] ;;
   ; A1-baseline pose weights. Earlier devq length-scaled values made trot
   ; in-place too aggressive and amplified pitch/roll oscillation.
-  (6,6)   1000.0   ; p_base_x
+  (6,6)   250.0    ; p_base_x, softened for megaDog forward trot to reduce overlong diagonal leg excursions.
   (7,7)   1000.0   ; p_base_y
   (8,8)   1500.0   ; p_base_z
   ; theta_base_z (yaw) was 100.0 - a clear outlier vs. roll/pitch's 300.0

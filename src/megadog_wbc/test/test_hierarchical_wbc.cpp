@@ -50,6 +50,17 @@ public:
         megadog::hwbc::WbcBase::update(stateDesired, inputDesired, rbdStateMeasured, mode, period, time);
         return formulateHaaJointPostureTask();
     }
+
+    megadog::hwbc::Task legJointPostureTask(const vector_t& stateDesired,
+                                            const vector_t& inputDesired,
+                                            const vector_t& rbdStateMeasured,
+                                            const size_t mode,
+                                            const scalar_t period,
+                                            const scalar_t time)
+    {
+        megadog::hwbc::WbcBase::update(stateDesired, inputDesired, rbdStateMeasured, mode, period, time);
+        return formulateLegJointPostureTask();
+    }
 };
 
 vector_t standStillRbdState(const vector_t& initState, const CentroidalModelInfo& info)
@@ -264,6 +275,109 @@ TEST(HierarchicalWbc, haaJointPostureTaskPullsAbadJointsTowardNominal)
     EXPECT_NEAR(task.b_(1), 2.0, 1e-12);
     EXPECT_NEAR(task.b_(2), -2.0, 1e-12);
     EXPECT_NEAR(task.b_(3), -2.0, 1e-12);
+}
+
+TEST(HierarchicalWbc, adaptiveLegPostureUsesCorrectContactOrderAndDoesNotDoubleCountHaa)
+{
+    const auto interface = megadog_legged_interface::createInterface();
+    const auto& info = interface->getCentroidalModelInfo();
+    CentroidalModelPinocchioMapping mapping(info);
+    PinocchioEndEffectorKinematics eeKinematics(interface->getPinocchioInterface(), mapping,
+                                                interface->modelSettings().contactNames3DoF);
+
+    megadog::hwbc::HierarchicalWbcConfig config;
+    config.leg_posture_adaptive_guard_enabled = true;
+    config.leg_posture_swing_scale = 0.1;
+    config.leg_posture_stance_scale = 0.4;
+    config.leg_posture_contact_blend_seconds = 0.0;
+    config.leg_posture_kfe_guard_start_rad = 10.0;
+    config.leg_posture_kfe_guard_full_rad = 11.0;
+    config.leg_posture_nominal_rad.assign(info.actuatedDofNum, 0.0);
+    InspectableWbc wbc(interface->getPinocchioInterface(), info, eeKinematics, config);
+
+    const vector_t initState = interface->getInitialState();
+    const vector_t measured = standStillRbdState(initState, info);
+    const vector_t input = vector_t::Zero(info.inputDim);
+    const auto task = wbc.legJointPostureTask(initState, input, measured, ModeNumber::LF_RH, 0.001, 20.0);
+
+    const std::array<double, 4> expectedLegScale{0.4, 0.1, 0.1, 0.4};
+    for (size_t leg = 0; leg < expectedLegScale.size(); ++leg) {
+        EXPECT_DOUBLE_EQ(task.a_(static_cast<long>(3 * leg), static_cast<long>(6 + 3 * leg)), 0.0);
+        EXPECT_NEAR(task.a_(static_cast<long>(3 * leg + 1), static_cast<long>(6 + 3 * leg + 1)),
+                    expectedLegScale[leg], 1e-12);
+        EXPECT_NEAR(task.a_(static_cast<long>(3 * leg + 2), static_cast<long>(6 + 3 * leg + 2)),
+                    expectedLegScale[leg], 1e-12);
+    }
+}
+
+TEST(HierarchicalWbc, adaptiveLegPostureBlendsStanceTargetTowardNominal)
+{
+    const auto interface = megadog_legged_interface::createInterface();
+    const auto& info = interface->getCentroidalModelInfo();
+    CentroidalModelPinocchioMapping mapping(info);
+    PinocchioEndEffectorKinematics eeKinematics(interface->getPinocchioInterface(), mapping,
+                                                interface->modelSettings().contactNames3DoF);
+
+    megadog::hwbc::HierarchicalWbcConfig config;
+    config.leg_posture_adaptive_guard_enabled = true;
+    config.leg_posture_kp = 10.0;
+    config.leg_posture_kd = 0.0;
+    config.leg_posture_swing_scale = 0.1;
+    config.leg_posture_stance_scale = 1.0;
+    config.leg_posture_stance_nmpc_blend = 0.25;
+    config.leg_posture_contact_blend_seconds = 0.0;
+    config.leg_posture_kfe_guard_start_rad = 10.0;
+    config.leg_posture_kfe_guard_full_rad = 11.0;
+
+    const vector_t measuredState = interface->getInitialState();
+    config.leg_posture_nominal_rad.assign(measuredState.tail(info.actuatedDofNum).data(),
+                                          measuredState.tail(info.actuatedDofNum).data() + info.actuatedDofNum);
+    InspectableWbc wbc(interface->getPinocchioInterface(), info, eeKinematics, config);
+
+    vector_t desiredState = measuredState;
+    desiredState.tail(info.actuatedDofNum).array() += 0.4;
+    const vector_t measured = standStillRbdState(measuredState, info);
+    const vector_t input = vector_t::Zero(info.inputDim);
+    const auto task = wbc.legJointPostureTask(desiredState, input, measured, ModeNumber::LF_RH, 0.001, 20.0);
+
+    // LF is in stance: target keeps 25% of the 0.4 rad NMPC displacement.
+    EXPECT_NEAR(task.b_(1), 1.0, 1e-12);
+    // LH is in swing: target follows NMPC, but its row has 0.1 authority.
+    EXPECT_NEAR(task.b_(4), 0.4, 1e-12);
+    EXPECT_DOUBLE_EQ(task.a_(0, 6), 0.0);
+}
+
+TEST(HierarchicalWbc, adaptiveHaaPostureIsSoftInSafeRangeAndFullNearGuard)
+{
+    const auto interface = megadog_legged_interface::createInterface();
+    const auto& info = interface->getCentroidalModelInfo();
+    CentroidalModelPinocchioMapping mapping(info);
+    PinocchioEndEffectorKinematics eeKinematics(interface->getPinocchioInterface(), mapping,
+                                                interface->modelSettings().contactNames3DoF);
+
+    megadog::hwbc::HierarchicalWbcConfig config;
+    config.haa_posture_kp = 10.0;
+    config.haa_posture_kd = 0.0;
+    config.haa_posture_nominal_rad = {-0.4, -0.4, 0.4, 0.4};
+    config.haa_posture_dynamic_band_rad = 0.08;
+    config.haa_posture_adaptive_guard_enabled = true;
+    config.haa_posture_safe_scale = 0.25;
+    config.haa_posture_guard_start_abs_rad = 0.44;
+    config.haa_posture_guard_full_abs_rad = 0.48;
+    InspectableWbc wbc(interface->getPinocchioInterface(), info, eeKinematics, config);
+
+    vector_t desired = interface->getInitialState();
+    desired(12) = -0.30;
+    vector_t measured = standStillRbdState(desired, info);
+    const vector_t input = vector_t::Zero(info.inputDim);
+    auto task = wbc.haaJointPostureTask(desired, input, measured, ModeNumber::STANCE, 0.001, 20.0);
+    EXPECT_NEAR(task.a_(0, 6), 0.25, 1e-12);
+    EXPECT_NEAR(task.b_(0), 0.0, 1e-12);
+
+    measured(6) = -0.48;
+    task = wbc.haaJointPostureTask(desired, input, measured, ModeNumber::STANCE, 0.001, 20.0);
+    EXPECT_NEAR(task.a_(0, 6), 1.0, 1e-12);
+    EXPECT_NEAR(task.b_(0), 0.8, 1e-12);
 }
 
 int main(int argc, char** argv)

@@ -16,6 +16,7 @@
 #include <ocs2_robotic_tools/common/RotationTransforms.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 
@@ -25,6 +26,21 @@ namespace hwbc
 {
 using namespace ocs2;
 using namespace ocs2::legged_robot;
+
+namespace
+{
+// Actuated joint order follows task.info's defaultJointState:
+//   LF, LH, RF, RH
+// Contact flags follow contactNames3DoF / modeNumber2StanceLeg():
+//   LF, RF, LH, RH
+constexpr std::array<size_t, 4> kJointLegToContactLeg{0, 2, 1, 3};
+
+scalar_t smoothStep01(const scalar_t value)
+{
+    const scalar_t x = std::clamp(value, scalar_t{0.0}, scalar_t{1.0});
+    return x * x * (scalar_t{3.0} - scalar_t{2.0} * x);
+}
+}  // namespace
 
 WbcBase::WbcBase(const PinocchioInterface& pinocchioInterface, CentroidalModelInfo info,
                  const PinocchioEndEffectorKinematics& eeKinematics, HierarchicalWbcConfig config)
@@ -102,6 +118,22 @@ vector_t WbcBase::update(const vector_t& stateDesired, const vector_t& inputDesi
         if (flag) {
             numContacts_++;
         }
+    }
+
+    if (config_.leg_posture_adaptive_guard_enabled) {
+        const scalar_t blendSeconds = static_cast<scalar_t>(config_.leg_posture_contact_blend_seconds);
+        for (size_t jointLeg = 0; jointLeg < legPostureStanceBlend_.size(); ++jointLeg) {
+            const size_t contactLeg = kJointLegToContactLeg[jointLeg];
+            const scalar_t target = contactLeg < contactFlag_.size() && contactFlag_[contactLeg] ? 1.0 : 0.0;
+            if (!legPostureBlendInitialized_ || !(blendSeconds > 0.0) || !(period > 0.0)) {
+                legPostureStanceBlend_[jointLeg] = target;
+            } else {
+                const scalar_t maxStep = std::clamp(period / blendSeconds, scalar_t{0.0}, scalar_t{1.0});
+                const scalar_t error = target - legPostureStanceBlend_[jointLeg];
+                legPostureStanceBlend_[jointLeg] += std::clamp(error, -maxStep, maxStep);
+            }
+        }
+        legPostureBlendInitialized_ = true;
     }
 
     updateMeasured(rbdStateMeasured);
@@ -320,10 +352,29 @@ Task WbcBase::formulateHaaJointPostureTask()
         } else {
             qTarget = qJointDesired(static_cast<long>(joint));
         }
-        a(static_cast<long>(row), static_cast<long>(6 + joint)) = 1.0;
+        scalar_t rowScale = 1.0;
+        if (config_.haa_posture_adaptive_guard_enabled && useConfiguredNominal) {
+            const scalar_t guardStart = static_cast<scalar_t>(config_.haa_posture_guard_start_abs_rad);
+            const scalar_t guardFull = static_cast<scalar_t>(config_.haa_posture_guard_full_abs_rad);
+            scalar_t guard = 1.0;
+            if (guardFull > guardStart) {
+                const scalar_t excursion = std::max(std::abs(qJointMeasured(static_cast<long>(joint))),
+                                                    std::abs(qJointDesired(static_cast<long>(joint))));
+                guard = smoothStep01((excursion - guardStart) / (guardFull - guardStart));
+            }
+            const scalar_t nominal = static_cast<scalar_t>(config_.haa_posture_nominal_rad[row]);
+            // The legacy dynamic band is itself a permanent clamp. The
+            // adaptive path follows NMPC directly in the safe region and
+            // introduces the nominal anchor only as the guard activates.
+            qTarget = qJointDesired(static_cast<long>(joint));
+            qTarget = (1.0 - guard) * qTarget + guard * nominal;
+            const scalar_t safeScale = static_cast<scalar_t>(std::clamp(config_.haa_posture_safe_scale, 0.0, 1.0));
+            rowScale = safeScale + guard * (1.0 - safeScale);
+        }
+        a(static_cast<long>(row), static_cast<long>(6 + joint)) = rowScale;
         b(static_cast<long>(row)) =
-            config_.haa_posture_kp * (qTarget - qJointMeasured(static_cast<long>(joint))) +
-            config_.haa_posture_kd * (vJointDesired(static_cast<long>(joint)) - vJointMeasured(static_cast<long>(joint)));
+            rowScale * (config_.haa_posture_kp * (qTarget - qJointMeasured(static_cast<long>(joint))) +
+                        config_.haa_posture_kd * (vJointDesired(static_cast<long>(joint)) - vJointMeasured(static_cast<long>(joint))));
         ++row;
     }
 
@@ -343,20 +394,22 @@ Task WbcBase::formulateLegJointPostureTask()
     const vector_t vJointDesired = vDesired_.tail(info_.actuatedDofNum);
 
     for (size_t joint = 0; joint < info_.actuatedDofNum; ++joint) {
-        const size_t leg = joint / 3;
-        const bool legInStance = leg < contactFlag_.size() && contactFlag_[leg];
+        const size_t jointLeg = joint / 3;
+        const size_t contactLeg = jointLeg < kJointLegToContactLeg.size() ? kJointLegToContactLeg[jointLeg] : jointLeg;
+        const bool legInStance = contactLeg < contactFlag_.size() && contactFlag_[contactLeg];
 
         // Per IIT DLS's published phase-gated postural task (Raiola et al.
         // 2020, Frontiers in Robotics and AI) - the target itself also
         // switches, not just the weight: a STANCE leg pulls toward the
-        // fixed/banded nominal (the anti-drift/anti-singularity anchor
+        // fixed/banded nominal (the anti-drift/joint-stop anchor
         // this task exists for), while a SWINGING leg falls back to
         // qJointDesired regardless of any configured nominal, so its
         // (reduced-weight) contribution reinforces formulateSwingLegTask()'s
         // own trajectory instead of pulling against it - a soft
-        // consistency check for singularity-side disturbance, not a
+        // consistency check for upper-joint-stop disturbance, not a
         // competitor.
-        const bool useConfiguredNominal = legInStance &&
+        const bool adaptiveGuard = config_.leg_posture_adaptive_guard_enabled;
+        const bool useConfiguredNominal = !adaptiveGuard && legInStance &&
                                           config_.leg_posture_nominal_rad.size() == info_.actuatedDofNum &&
                                           std::isfinite(config_.leg_posture_nominal_rad[joint]);
         scalar_t qTarget;
@@ -382,8 +435,46 @@ Task WbcBase::formulateLegJointPostureTask()
         // the row's contribution to the shared least-squares cost (a^T a)
         // shrinks with the square of the scale, same as any other task
         // weight.
-        const scalar_t legScale =
-            legInStance ? 1.0 : static_cast<scalar_t>(std::clamp(config_.leg_posture_swing_scale, 0.0, 1.0));
+        scalar_t legScale;
+        if (adaptiveGuard) {
+            const scalar_t swingScale = static_cast<scalar_t>(std::clamp(config_.leg_posture_swing_scale, 0.0, 1.0));
+            const scalar_t stanceScale = static_cast<scalar_t>(std::clamp(config_.leg_posture_stance_scale, 0.0, 1.0));
+            const scalar_t stanceBlend = jointLeg < legPostureStanceBlend_.size() ? legPostureStanceBlend_[jointLeg]
+                                                                                 : (legInStance ? 1.0 : 0.0);
+            legScale = swingScale + stanceBlend * (stanceScale - swingScale);
+            qTarget = qJointDesired(static_cast<long>(joint));
+
+            if (config_.leg_posture_nominal_rad.size() == info_.actuatedDofNum &&
+                std::isfinite(config_.leg_posture_nominal_rad[joint])) {
+                const scalar_t nominal = static_cast<scalar_t>(config_.leg_posture_nominal_rad[joint]);
+                const scalar_t nmpcBlend = static_cast<scalar_t>(
+                    std::clamp(config_.leg_posture_stance_nmpc_blend, 0.0, 1.0));
+                const scalar_t nominalAnchor = stanceBlend * (1.0 - nmpcBlend);
+                qTarget = (1.0 - nominalAnchor) * qTarget + nominalAnchor * nominal;
+            }
+
+            if (joint % 3 == 0) {
+                // HAA has its own posture task; do not regularize it twice.
+                legScale = 0.0;
+            } else if (joint % 3 == 2 &&
+                       config_.leg_posture_nominal_rad.size() == info_.actuatedDofNum &&
+                       std::isfinite(config_.leg_posture_nominal_rad[joint])) {
+                const scalar_t guardStart = static_cast<scalar_t>(config_.leg_posture_kfe_guard_start_rad);
+                const scalar_t guardFull = static_cast<scalar_t>(config_.leg_posture_kfe_guard_full_rad);
+                scalar_t guard = 1.0;
+                if (guardFull > guardStart) {
+                    const scalar_t upperExcursion = std::max(qJointMeasured(static_cast<long>(joint)),
+                                                             qJointDesired(static_cast<long>(joint)));
+                    guard = smoothStep01((upperExcursion - guardStart) / (guardFull - guardStart));
+                }
+                const scalar_t nominal = static_cast<scalar_t>(config_.leg_posture_nominal_rad[joint]);
+                qTarget = (1.0 - guard) * qTarget + guard * nominal;
+                legScale = std::max(legScale, guard);
+            }
+        } else {
+            legScale = legInStance ? 1.0 :
+                static_cast<scalar_t>(std::clamp(config_.leg_posture_swing_scale, 0.0, 1.0));
+        }
         a(static_cast<long>(joint), static_cast<long>(6 + joint)) = legScale;
         b(static_cast<long>(joint)) =
             legScale * (config_.leg_posture_kp * (qTarget - qJointMeasured(static_cast<long>(joint))) +

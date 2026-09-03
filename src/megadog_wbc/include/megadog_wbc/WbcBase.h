@@ -19,6 +19,7 @@
 #include <ocs2_legged_robot/gait/MotionPhaseDefinition.h>
 #include <ocs2_pinocchio_interface/PinocchioEndEffectorKinematics.h>
 
+#include <array>
 #include <limits>
 #include <vector>
 
@@ -61,6 +62,16 @@ struct HierarchicalWbcConfig
     // binary behavior: fully pinned when nominal is set, fully dynamic when
     // it's empty.
     double haa_posture_dynamic_band_rad = 0.0;
+    // Optional devq-style safety guard. In the normal HAA range the posture
+    // row follows the NMPC target at haa_posture_safe_scale. As either the
+    // measured or planned angle approaches the empirically unsafe magnitude,
+    // the row smoothly returns to full authority and blends its target back
+    // toward the configured nominal. Disabled by default to preserve the
+    // upstream/static posture semantics for other users of this library.
+    bool haa_posture_adaptive_guard_enabled = false;
+    double haa_posture_safe_scale = 1.0;
+    double haa_posture_guard_start_abs_rad = 0.44;
+    double haa_posture_guard_full_abs_rad = 0.48;
     // NOTE: deliberately no haa_posture_swing_scale field here (unlike
     // leg_posture_swing_scale below) - contact-gating this task the same
     // way was tried and made things worse, not better (see
@@ -81,7 +92,7 @@ struct HierarchicalWbcConfig
     // the dynamic qJointDesired fallback regardless of any configured
     // nominal (see formulateLegJointPostureTask()), so this reduced weight
     // reinforces formulateSwingLegTask()'s own trajectory rather than
-    // fighting it - a soft consistency check against singularity-side
+    // fighting it - a soft consistency check against upper-joint-stop
     // disturbance during swing, not a competitor.
     //
     // Six same-session sim attempts at a dynamic/bounded posture target
@@ -92,19 +103,17 @@ struct HierarchicalWbcConfig
     // backup at all) was tried first and verified clean through 332s of
     // TROT_IN_PLACE - but MIT WBIC's real-hardware precedent for "trust
     // the swing Cartesian task alone" (arXiv:1909.06586, Mini-Cheetah)
-    // assumes a leg Jacobian that stays full-rank through the whole swing
-    // range, which does NOT hold for devq specifically: its
-    // calf_position_max=0.0 sits exactly at a real kinematic singularity
-    // with zero built-in URDF margin (unlike A1/Go1/Aliengo's 37-52.5
-    // degrees - see joint_position_upper_limits_override_rad's doc
-    // comment), so a swing trajectory that's ever disturbed toward that
-    // configuration would have no restoring pull left if this were
-    // exactly 0. Default 0.15 instead mirrors IIT DLS's published
+    // assumes a leg Jacobian that stays well-conditioned through the whole
+    // swing range. Devq's KFE joint-frame rotation means q=0 is a physical
+    // upper stop, not the collinear-leg singularity itself; it still leaves
+    // only about 0.436 rad of geometric margin, less than A1-family models.
+    // A swing trajectory disturbed toward that low-leverage stop therefore
+    // still needs a restoring pull. Default 0.15 mirrors IIT DLS's published
     // phase-gated postural task (Raiola et al. 2020, Frontiers in
     // Robotics and AI: Kp_sw/Kd_sw meaningfully reduced from Kp_st/Kd_st,
     // not zeroed) - small enough to stay well clear of the fighting that
     // destabilized every full-weight attempt, but nonzero so a knee that
-    // drifts toward the singularity during swing still has *something*
+    // drifts toward the upper stop during swing still has *something*
     // pulling it back rather than nothing.
     double leg_posture_swing_scale = 0.15;
     // Optional 12-joint target in actuated joint order [LF, LH, RF, RH].
@@ -119,12 +128,26 @@ struct HierarchicalWbcConfig
     // exactly to nominal - natural, swing-responsive motion bounded around
     // a known-safe angle. A joint's entry being 0/absent keeps that one
     // joint's old exact-pin behavior. This is deliberately per-joint rather
-    // than a single scalar: devq's KFE sits close to calf_position_max=0.0
-    // (a real kinematic singularity - see the long makeDevqWbcConfig()
-    // comment in MegadogController.cpp) and needs a tight band, while HFE
+    // than a single scalar: devq's KFE has less geometric margin near its
+    // upper stop than the A1-family models and needs a tight band, while HFE
     // has generous physical margin on both sides and can safely take a
     // wider one.
     std::vector<double> leg_posture_dynamic_band_rad;
+    // Optional phase-continuous posture regularization for devq. HAA rows are
+    // omitted here because formulateHaaJointPostureTask() owns them. HFE/KFE
+    // blend the NMPC and nominal targets in stance, while KFE smoothly
+    // regains the full nominal anchor as it approaches its upper joint stop.
+    // Contact changes are blended to avoid a one-tick 0.15 -> 1.0 weight jump.
+    bool leg_posture_adaptive_guard_enabled = false;
+    double leg_posture_stance_scale = 1.0;
+    // Fraction of the NMPC joint target retained after a leg has fully
+    // entered stance. 1.0 follows NMPC exactly; 0.0 restores the fixed
+    // nominal anchor. The same contact blend used for row authority also
+    // blends this target, avoiding a discontinuity at touchdown/liftoff.
+    double leg_posture_stance_nmpc_blend = 1.0;
+    double leg_posture_contact_blend_seconds = 0.0;
+    double leg_posture_kfe_guard_start_rad = -0.70;
+    double leg_posture_kfe_guard_full_rad = -0.45;
     // qm_control keeps the dog motor-facing WBC output disabled for the first
     // 10 s and uses a lighter WBC hierarchy during that window. StateTrot can
     // shorten this in simulation, but the default mirrors the reference.
@@ -179,10 +202,9 @@ struct HierarchicalWbcConfig
     // Exists specifically because real reference robots (A1/Go1/Aliengo -
     // see qiayuanl/legged_control's own URDFs) all keep 37-52.5 degrees of
     // built-in URDF margin between their own calf_position_max and the
-    // thigh/calf-collinear singularity, while devq's URDF sets
-    // calf_position_max=0.0 - exactly AT that singularity, zero margin.
-    // formulateJointLimitsTask() enforcing the raw URDF limit therefore
-    // protects nothing on devq's knee; this override lets megaDog restore
+    // thigh/calf-collinear singularity. Devq's KFE frame offset leaves about
+    // 0.436 rad to collinearity at q=0, but that is still a smaller margin.
+    // This override lets megaDog restore
     // the same kind of real, hardware-enforced-style margin real quadruped
     // URDFs carry, at the QP-constraint level, without touching the actual
     // URDF/hardware limit itself (which may or may not reflect a genuine
@@ -236,6 +258,8 @@ private:
 
     contact_flag_t contactFlag_{};
     size_t numContacts_{};
+    std::array<scalar_t, 4> legPostureStanceBlend_{};
+    bool legPostureBlendInitialized_ = false;
 
     vector_t qMeasured_, vMeasured_, inputLast_;
     vector_t qDesired_, vDesired_, baseAccDesired_;
