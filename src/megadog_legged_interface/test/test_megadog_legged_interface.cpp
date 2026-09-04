@@ -49,10 +49,10 @@ TEST(MegadogA1LeggedInterface, modelSettingsUseMegadogJointAndOcs2ContactOrder) 
   const vector_t jointState = interface->getInitialState().tail(interface->getCentroidalModelInfo().actuatedDofNum);
   ASSERT_EQ(jointState.size(), 12);
   const std::array<double, 12> expectedJointState{
-      -0.43, 0.478618, -1.181561,
-      -0.43, 0.478618, -1.181561,
-       0.43, 0.478618, -1.181561,
-       0.43, 0.478618, -1.181561};
+      -0.451, 0.487400, -1.199164,
+      -0.451, 0.487400, -1.199164,
+       0.451, 0.487400, -1.199164,
+       0.451, 0.487400, -1.199164};
   for (long i = 0; i < jointState.size(); ++i) {
     EXPECT_NEAR(jointState(i), expectedJointState[static_cast<size_t>(i)], 1e-9);
   }

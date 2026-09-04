@@ -142,6 +142,11 @@ vector_t WbcBase::update(const vector_t& stateDesired, const vector_t& inputDesi
     return {};
 }
 
+void WbcBase::setSwingFootLateralCommandPlanarSpeed(scalar_t speed_m_s)
+{
+    swingFootLateralCommandPlanarSpeed_ = speed_m_s;
+}
+
 void WbcBase::updateMeasured(const vector_t& rbdStateMeasured)
 {
     qMeasured_.setZero();
@@ -492,16 +497,24 @@ Task WbcBase::formulateSwingLegTask()
     eeKinematics_->setPinocchioInterface(pinocchioInterfaceDesired_);
     std::vector<vector3_t> posDesired = eeKinematics_->getPosition(vector_t());
     std::vector<vector3_t> velDesired = eeKinematics_->getVelocity(vector_t(), vector_t());
+    const scalar_t minPlanarSpeed =
+        static_cast<scalar_t>(std::max(config_.swing_foot_lateral_min_planar_speed_m_s, 0.0));
+    const scalar_t shapingGatePlanarSpeed = std::isfinite(swingFootLateralCommandPlanarSpeed_)
+        ? std::max(swingFootLateralCommandPlanarSpeed_, scalar_t{0.0})
+        : vDesired_.head<2>().norm();
     const bool shapeSwingFootLateralTarget =
         config_.swing_foot_lateral_nominal_y_m.size() == info_.numThreeDofContacts &&
-        config_.swing_foot_lateral_target_blend > 0.0;
+        config_.swing_foot_lateral_target_blend > 0.0 &&
+        shapingGatePlanarSpeed + scalar_t{1e-6} >= minPlanarSpeed;
     const scalar_t swingFootLateralBlend = static_cast<scalar_t>(
         std::clamp(config_.swing_foot_lateral_target_blend, 0.0, 1.0));
-    const matrix3_t rotationBaseDesiredToWorld =
-        getRotationMatrixFromZyxEulerAngles<scalar_t>(qDesired_.segment<3>(3));
-    const matrix3_t rotationWorldToBaseDesired = rotationBaseDesiredToWorld.transpose();
-    const vector3_t baseDesiredPositionWorld = qDesired_.head<3>();
-    const vector3_t baseDesiredLinearVelocityWorld = vDesired_.head<3>();
+    vector3_t measuredYawOnly = vector3_t::Zero();
+    measuredYawOnly.x() = qMeasured_(3);
+    const matrix3_t rotationBaseMeasuredYawToWorld =
+        getRotationMatrixFromZyxEulerAngles<scalar_t>(measuredYawOnly);
+    const matrix3_t rotationWorldToBaseMeasuredYaw = rotationBaseMeasuredYawToWorld.transpose();
+    const vector3_t baseMeasuredPositionWorld = qMeasured_.head<3>();
+    const vector3_t baseMeasuredLinearVelocityWorld = vMeasured_.head<3>();
 
     matrix_t a(3 * (info_.numThreeDofContacts - numContacts_), numDecisionVars_);
     vector_t b(a.rows());
@@ -514,16 +527,16 @@ Task WbcBase::formulateSwingLegTask()
                 const scalar_t nominalY = static_cast<scalar_t>(config_.swing_foot_lateral_nominal_y_m[i]);
                 if (std::isfinite(nominalY)) {
                     vector3_t footRelativeDesired =
-                        rotationWorldToBaseDesired * (posDesired[i] - baseDesiredPositionWorld);
+                        rotationWorldToBaseMeasuredYaw * (posDesired[i] - baseMeasuredPositionWorld);
                     footRelativeDesired.y() =
                         (1.0 - swingFootLateralBlend) * footRelativeDesired.y() + swingFootLateralBlend * nominalY;
-                    posDesired[i] = baseDesiredPositionWorld + rotationBaseDesiredToWorld * footRelativeDesired;
+                    posDesired[i] = baseMeasuredPositionWorld + rotationBaseMeasuredYawToWorld * footRelativeDesired;
 
                     vector3_t footRelativeVelocityDesired =
-                        rotationWorldToBaseDesired * (velDesired[i] - baseDesiredLinearVelocityWorld);
+                        rotationWorldToBaseMeasuredYaw * (velDesired[i] - baseMeasuredLinearVelocityWorld);
                     footRelativeVelocityDesired.y() *= (1.0 - swingFootLateralBlend);
                     velDesired[i] =
-                        baseDesiredLinearVelocityWorld + rotationBaseDesiredToWorld * footRelativeVelocityDesired;
+                        baseMeasuredLinearVelocityWorld + rotationBaseMeasuredYawToWorld * footRelativeVelocityDesired;
                 }
             }
             vector3_t accel = config_.swing_kp * (posDesired[i] - posMeasured[i]) + config_.swing_kd * (velDesired[i] - velMeasured[i]);

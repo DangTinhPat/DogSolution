@@ -610,15 +610,16 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
         if (!activePolicy.controllerPtr_ || activePolicy.timeTrajectory_.empty() || activePolicy.stateTrajectory_.empty()) {
             return false;
         }
-        const scalar_t policyModeQueryTime =
-            std::clamp(observation.time, activePolicy.timeTrajectory_.front(), activePolicy.timeTrajectory_.back());
-        const size_t activePolicyMode = safeModeAtTimeOrStance(activePolicy.modeSchedule_, policyModeQueryTime);
-        if (activePolicyMode != observation.mode) {
-            return false;
-        }
         mpc_awaiting_fresh_policy_ = false;
 
         try {
+            // observation.mode comes from the live GaitSchedule for this
+            // control tick, while the MRT policy's modeSchedule_ is the
+            // schedule snapshot used by the latest completed MPC solve. Around
+            // trot phase boundaries those two snapshots can legitimately be a
+            // few control ticks apart. Dropping the tick here freezes torque at
+            // exactly the contact swap, so evaluate the policy and let its own
+            // mode drive WBC's contact constraints for state/input consistency.
             if (!evaluatePolicyWithoutModeAtTime(*mrt_, observation.time, observation.state, optimizedState, optimizedInput,
                                                  plannedMode)) {
                 return false;
@@ -635,6 +636,9 @@ bool MegadogWbcRuntime::update(const double time_s, const double dt_s, const rcl
 
     vector_t cmd;
     try {
+        const scalar_t commandPlanarSpeed = static_cast<scalar_t>(
+            std::hypot(command.base_velocity_x_m_s, command.base_velocity_y_m_s));
+        wbc_->setSwingFootLateralCommandPlanarSpeed(commandPlanarSpeed);
         cmd = wbc_->update(optimizedState, optimizedInput, rbdState, plannedMode, dt_s, time_s);
     } catch (const std::exception& e) {
         std::cerr << "[MegadogWbcRuntime] HierarchicalWbc::update failed: " << e.what() << std::endl;

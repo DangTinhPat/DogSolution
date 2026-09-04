@@ -417,6 +417,91 @@ TEST(HierarchicalWbc, swingFootLateralTargetShapesOnlySwingFeetInContactOrder)
     EXPECT_LT(task.b_(4), 0.0);  // LH swing foot starts on robot-left, so center is -Y.
 }
 
+TEST(HierarchicalWbc, swingFootLateralTargetIsDisabledForStationaryTrot)
+{
+    const auto interface = megadog_legged_interface::createInterface();
+    const auto& info = interface->getCentroidalModelInfo();
+    CentroidalModelPinocchioMapping mapping(info);
+    PinocchioEndEffectorKinematics eeKinematics(interface->getPinocchioInterface(), mapping,
+                                                interface->modelSettings().contactNames3DoF);
+
+    megadog::hwbc::HierarchicalWbcConfig config;
+    config.swing_kp = 10.0;
+    config.swing_kd = 0.0;
+    config.swing_foot_lateral_target_blend = 1.0;
+    config.swing_foot_lateral_min_planar_speed_m_s = 0.03;
+    config.swing_foot_lateral_nominal_y_m = {0.0, 0.0, 0.0, 0.0};
+    InspectableWbc wbc(interface->getPinocchioInterface(), info, eeKinematics, config);
+
+    const vector_t state = interface->getInitialState();
+    const vector_t measured = standStillRbdState(state, info);
+    const vector_t input = vector_t::Zero(info.inputDim);
+    const auto task = wbc.swingLegTask(state, input, measured, ModeNumber::LF_RH, 0.001, 20.0);
+
+    ASSERT_EQ(task.a_.rows(), 6);
+    ASSERT_EQ(task.b_.rows(), 6);
+    EXPECT_NEAR(task.b_.norm(), 0.0, 1e-12);
+}
+
+TEST(HierarchicalWbc, swingFootLateralTargetGateUsesCallerCommandSpeed)
+{
+    const auto interface = megadog_legged_interface::createInterface();
+    const auto& info = interface->getCentroidalModelInfo();
+    CentroidalModelPinocchioMapping mapping(info);
+    PinocchioEndEffectorKinematics eeKinematics(interface->getPinocchioInterface(), mapping,
+                                                interface->modelSettings().contactNames3DoF);
+
+    megadog::hwbc::HierarchicalWbcConfig config;
+    config.swing_kp = 10.0;
+    config.swing_kd = 0.0;
+    config.swing_foot_lateral_target_blend = 1.0;
+    config.swing_foot_lateral_min_planar_speed_m_s = 0.03;
+    config.swing_foot_lateral_nominal_y_m = {0.0, 0.0, 0.0, 0.0};
+    InspectableWbc wbc(interface->getPinocchioInterface(), info, eeKinematics, config);
+
+    vector_t desiredMpcMoving = interface->getInitialState();
+    desiredMpcMoving(0) = 1.0;
+    const vector_t measured = standStillRbdState(desiredMpcMoving, info);
+    const vector_t input = vector_t::Zero(info.inputDim);
+
+    wbc.setSwingFootLateralCommandPlanarSpeed(0.0);
+    const auto task = wbc.swingLegTask(desiredMpcMoving, input, measured, ModeNumber::LF_RH, 0.001, 20.0);
+
+    ASSERT_EQ(task.a_.rows(), 6);
+    ASSERT_EQ(task.b_.rows(), 6);
+    EXPECT_NEAR(task.b_.norm(), 0.0, 1e-12);
+}
+
+TEST(HierarchicalWbc, swingFootLateralTargetIsAnchoredToMeasuredBaseFrame)
+{
+    const auto interface = megadog_legged_interface::createInterface();
+    const auto& info = interface->getCentroidalModelInfo();
+    CentroidalModelPinocchioMapping mapping(info);
+    PinocchioEndEffectorKinematics eeKinematics(interface->getPinocchioInterface(), mapping,
+                                                interface->modelSettings().contactNames3DoF);
+
+    megadog::hwbc::HierarchicalWbcConfig config;
+    config.swing_kp = 10.0;
+    config.swing_kd = 0.0;
+    config.swing_foot_lateral_target_blend = 1.0;
+    config.swing_foot_lateral_nominal_y_m = {0.0, 0.0, 0.0, 0.0};
+    InspectableWbc wbc(interface->getPinocchioInterface(), info, eeKinematics, config);
+
+    const vector_t state = interface->getInitialState();
+    const vector_t measured = standStillRbdState(state, info);
+    const vector_t input = vector_t::Zero(info.inputDim);
+    const auto taskZeroYaw = wbc.swingLegTask(state, input, measured, ModeNumber::LF_RH, 0.001, 20.0);
+
+    vector_t desiredYawBiased = state;
+    desiredYawBiased(9) = 0.12;
+    const auto taskYawBiased = wbc.swingLegTask(desiredYawBiased, input, measured, ModeNumber::LF_RH, 0.001, 20.0);
+
+    ASSERT_EQ(taskZeroYaw.b_.rows(), 6);
+    ASSERT_EQ(taskYawBiased.b_.rows(), 6);
+    EXPECT_NEAR(taskYawBiased.b_(1), taskZeroYaw.b_(1), 1e-9);
+    EXPECT_NEAR(taskYawBiased.b_(4), taskZeroYaw.b_(4), 1e-9);
+}
+
 int main(int argc, char** argv)
 {
     testing::InitGoogleTest(&argc, argv);

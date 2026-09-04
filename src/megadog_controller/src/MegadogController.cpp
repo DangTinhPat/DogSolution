@@ -90,7 +90,7 @@ constexpr double kLateralVelocityRampMps2 = 0.4;
 // conservative until turn-specific HAA/collision-distance logs are refreshed.
 constexpr double kTurnRateRadS = 0.12;
 constexpr double kYawRateRampRadS2 = 0.3;
-constexpr double kComHeightM = 0.22;
+constexpr double kComHeightM = 0.225;
 constexpr double kStandupDurationS = 3.0;
 constexpr double kStandupKp = 35.0;
 constexpr double kStandupKd = 1.8;
@@ -118,23 +118,23 @@ constexpr double kEffortBlendDurationS = 0.05;
 // initialState and reference.info's defaultJointState in sync with this.
 // FK on the current devq URDF shows that increasing HAA magnitude narrows
 // the foot track because of devq's HAA origin roll and lateral offsets.
-// This pass moves 0.40 -> 0.43 rad as a supervised sim experiment; do not
+// This pass moves 0.40 -> 0.451 rad as a supervised sim experiment; do not
 // carry this to hardware until collision-distance and sustained-gait logs
 // have been refreshed.
 //
-// HFE/KFE bumped 0.574027/-1.37275 -> 0.478618/-1.181561: the user noticed
+// HFE/KFE bumped 0.574027/-1.37275 -> 0.487400/-1.199164: the user noticed
 // STAND settling visibly higher than TROT_IN_PLACE despite both commanding
-// the same comHeight=0.22 (kComHeightM below). urdf-expert's FK analysis
+// the same comHeight target (kComHeightM below). urdf-expert's FK analysis
 // found the OLD HFE/KFE values were never actually kinematically consistent
-// with comHeight=0.22 - they naturally produce a foot-frame height of
+// with comHeight=0.225 - they naturally produce a foot-frame height of
 // 0.23876m (URDF frame, ~19mm too high). STAND hard-pins all 4 legs to
 // this posture at once (formulateLegJointPostureTask, weight 22), so it
 // wins over the single base-height task and settles near the posture's
 // own natural height; TROT_IN_PLACE only pins 2 legs (the current stance
-// diagonal) at a time, so it's pulled closer to the true 0.22 target -
+// diagonal) at a time, so it's pulled closer to the true 0.225 target -
 // hence the visible STAND/TROT height mismatch. The new values were
 // solved via FK (Newton iteration, holding foot x/y fixed) to land
-// exactly at 0.22000m for all 4 legs, so STAND and TROT should now settle
+// exactly at 0.22500m for all 4 legs, so STAND and TROT should now settle
 // at consistent heights. Lateral foot spread barely changes (+0.75mm).
 // KFE's static clearance to the calf_position_max=0.0 upper stop shrinks
 // from 1.373 to 1.182 rad (~14%) - still far from the ~0.80-0.87 rad
@@ -152,10 +152,10 @@ constexpr double kEffortBlendDurationS = 0.05;
 // of scope here (would need a fix in the measurement/terrain-height path,
 // not joint angles) - flagged, not fixed.
 constexpr std::array<double, 12> kStandingJointTargetRad{
-    -0.43, 0.478618, -1.181561,
-    -0.43, 0.478618, -1.181561,
-     0.43, 0.478618, -1.181561,
-     0.43, 0.478618, -1.181561,
+    -0.451, 0.487400, -1.199164,
+    -0.451, 0.487400, -1.199164,
+     0.451, 0.487400, -1.199164,
+     0.451, 0.487400, -1.199164,
 };
 
 bool isHaaJointIndex(const std::size_t joint_index)
@@ -257,28 +257,32 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     // not attempted further here per the conservative-first-pass scope.
     config.base_angular_kp = 300.0;
     config.base_angular_kd = 105.0;
-    config.haa_posture_kp = 120.0;
-    config.haa_posture_kd = 20.0;
-    config.haa_posture_task_weight = 80.0;
+    config.haa_posture_kp = 90.0;
+    config.haa_posture_kd = 16.0;
+    config.haa_posture_task_weight = 55.0;
     // HAA nominal narrows devq's stance as its magnitude increases. The
-    // current 0.43 rad setting is intentionally staged for supervised sim
-    // validation before any hardware use. kp/kd/weight stay at the values
-    // that were stable with the previous 0.40 rad nominal.
+    // current 0.451 rad setting is intentionally staged for supervised sim
+    // validation before any hardware use. kp/kd/weight are softer than the
+    // 0.40/0.43 rad runs because the full 120/20/80 HAA anchor made STAND
+    // roll drift when the nominal was pushed past 0.45 rad.
     //
     // haa_posture_dynamic_band_rad below lets this task track the WBC's own
     // moving qJointDesired within +-band of the nominal, instead of pinning
-    // it exactly. Keep the band tight enough that forward trot cannot let
-    // HAA relax back toward a wider footprint for long stretches.
+    // it exactly. Keep the band tight enough that trot cannot let HAA
+    // relax back toward a much wider footprint for long stretches.
     config.haa_posture_dynamic_band_rad = 0.006;
-    config.haa_posture_nominal_rad = {-0.43, -0.43, 0.43, 0.43};
+    config.haa_posture_nominal_rad = {-0.451, -0.451, 0.451, 0.451};
     config.haa_posture_adaptive_guard_enabled = false;
     config.haa_posture_safe_scale = 1.0;
     config.haa_posture_guard_start_abs_rad = 0.47;
     config.haa_posture_guard_full_abs_rad = 0.50;
-    // Experimental hook for reshaping only the SWING foot's own Cartesian
-    // target; kept disabled until a supervised A/B shows a clear width win.
-    config.swing_foot_lateral_target_blend = 0.0;
-    config.swing_foot_lateral_nominal_y_m = {0.112, -0.112, 0.112, -0.112};
+    // Shape only the SWING foot's own Cartesian lateral target. A direct
+    // extra HAA joint bias narrowed little and drove forward-trot KFE toward
+    // extension (~-0.72 rad), so footprint narrowing is staged at the foot
+    // target instead while stance/posture safety anchors stay intact.
+    config.swing_foot_lateral_target_blend = 0.35;
+    config.swing_foot_lateral_min_planar_speed_m_s = 0.03;
+    config.swing_foot_lateral_nominal_y_m = {0.104, -0.104, 0.104, -0.104};
     // leg_posture_task_weight must stay > 0 (see the long comment above) -
     // this is the one non-negotiable devq-specific WBC gain found this
     // session, everything else here is otherwise-standard devq tuning
@@ -287,17 +291,17 @@ megadog::hwbc::HierarchicalWbcConfig makeDevqWbcConfig()
     config.leg_posture_kd = 10.0;
     config.leg_posture_task_weight = 22.0;
     config.leg_posture_nominal_rad = {
-        -0.43, 0.478618, -1.181561,
-        -0.43, 0.478618, -1.181561,
-         0.43, 0.478618, -1.181561,
-         0.43, 0.478618, -1.181561,
+        -0.451, 0.487400, -1.199164,
+        -0.451, 0.487400, -1.199164,
+         0.451, 0.487400, -1.199164,
+         0.451, 0.487400, -1.199164,
     };
     config.leg_posture_adaptive_guard_enabled = true;
     config.leg_posture_stance_scale = 1.0;
     config.leg_posture_stance_nmpc_blend = 0.25;
     config.leg_posture_contact_blend_seconds = 0.05;
-    config.leg_posture_kfe_guard_start_rad = -0.70;
-    config.leg_posture_kfe_guard_full_rad = -0.45;
+    config.leg_posture_kfe_guard_start_rad = -0.90;
+    config.leg_posture_kfe_guard_full_rad = -0.80;
     // A same-session experiment tried bounded-dynamic bands on HFE/KFE too
     // (HFE 0.40, KFE 0.50 rad around nominal, FK-derived to leave 0.873 rad
     // clear of the calf_position_max=0.0 upper stop) - STAND was fully
@@ -1100,18 +1104,14 @@ controller_interface::return_type MegadogController::update(const rclcpp::Time& 
                     // Only hard-anchor an axis THIS state doesn't intend to
                     // move on (gated on the discrete per-state target, not
                     // the ramping smoothed value, to avoid float-equality
-                    // flicker mid-ramp). x is never anchored here (was
-                    // already true before strafe/turn existed) - FORWARD/
-                    // BACKWARD need it free-running, and setTargetTrajectories()
-                    // already free-runs x from the current base pose each
-                    // tick when base_x_reference_m is left non-finite. The
-                    // same free-run/anchor split now applies per-axis: y
-                    // stays anchored (no lateral drift) unless STRAFE_* is
-                    // actively driving it, and yaw stays anchored (no
-                    // unintended turning/heading drift) unless TURN_* is
-                    // actively driving it - this is what makes STRAFE_LEFT
-                    // genuine sideways translation with heading held fixed,
-                    // not a turn-then-walk.
+                    // flicker mid-ramp). FORWARD/BACKWARD leave x
+                    // free-running; STRAFE_* leave y free-running; TURN_*
+                    // leave yaw free-running. TROT_IN_PLACE anchors all
+                    // three, otherwise the MPC can quietly convert a
+                    // stationary trot into a slow free-running creep.
+                    if (target_velocity_x == 0.0) {
+                        command.base_x_reference_m = latched_base_position_reference_m_[0];
+                    }
                     if (target_velocity_y == 0.0) {
                         command.base_y_reference_m = latched_base_position_reference_m_[1];
                     }

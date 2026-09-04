@@ -202,7 +202,7 @@ initialState
    ;; Base Pose: [position, orientation] ;;
    (6,0)  0.0     ; p_base_x
    (7,0)  0.0     ; p_base_y
-   (8,0)  0.22    ; p_base_z
+   (8,0)  0.225   ; p_base_z
    (9,0)  0.0     ; theta_base_z
    (10,0) 0.0     ; theta_base_y
    (11,0) 0.0     ; theta_base_x
@@ -212,29 +212,29 @@ initialState
    ;; even fell outside devq's real calf position limit [0.436,2.705]) ;;
    ;; HAA magnitude narrows devq's stance in the current URDF: the fixed hip
    ;; lateral offset and HAA origin roll mean larger absolute HAA pulls the
-   ;; feet further under the body. This pass stages 0.43 rad for supervised
+   ;; feet further under the body. This pass stages 0.451 rad for supervised
    ;; sim validation; keep it synchronized with reference.info and
    ;; MegadogController.cpp.
-   ;; HFE/KFE bumped 0.574027/-1.37275 -> 0.478618/-1.181561: urdf-expert's
+   ;; HFE/KFE bumped 0.574027/-1.37275 -> 0.487400/-1.199164: urdf-expert's
    ;; FK analysis found the old values were never kinematically consistent
-   ;; with p_base_z=0.22 above (naturally producing ~0.239m instead), which
+   ;; with p_base_z=0.225 above (naturally producing ~0.239m instead), which
    ;; is why STAND (all 4 legs pinned here) visibly settled higher than
    ;; TROT_IN_PLACE (only 2 legs pinned at a time). New values solved via
-   ;; FK to land exactly at 0.22m - see MegadogController.cpp's
+   ;; FK to land exactly at 0.225m - see MegadogController.cpp's
    ;; kStandingJointTargetRad comment for the full story, including the
    ;; KFE-singularity-clearance re-verification this needed.
-   (12,0) -0.43       ; LF_HAA
-   (13,0)  0.478618   ; LF_HFE
-   (14,0) -1.181561   ; LF_KFE
-   (15,0) -0.43       ; LH_HAA
-   (16,0)  0.478618   ; LH_HFE
-   (17,0) -1.181561   ; LH_KFE
-   (18,0)  0.43       ; RF_HAA
-   (19,0)  0.478618   ; RF_HFE
-   (20,0) -1.181561   ; RF_KFE
-   (21,0)  0.43       ; RH_HAA
-   (22,0)  0.478618   ; RH_HFE
-   (23,0) -1.181561   ; RH_KFE
+   (12,0) -0.451      ; LF_HAA
+   (13,0)  0.487400   ; LF_HFE
+   (14,0) -1.199164   ; LF_KFE
+   (15,0) -0.451      ; LH_HAA
+   (16,0)  0.487400   ; LH_HFE
+   (17,0) -1.199164   ; LH_KFE
+   (18,0)  0.451      ; RF_HAA
+   (19,0)  0.487400   ; RF_HFE
+   (20,0) -1.199164   ; RF_KFE
+   (21,0)  0.451      ; RH_HAA
+   (22,0)  0.487400   ; RH_HFE
+   (23,0) -1.199164   ; RH_KFE
 }
 
 ; standard state weight matrix
@@ -278,7 +278,7 @@ Q
 
   ;; Leg Joint Positions: [LF, LH, RF, RH] ;;
   ; HAA gets a light extra pull so NMPC keeps the trot footprint close to the
-  ; staged 0.43 rad nominal instead of letting the WBC correct it downstream.
+  ; staged 0.451 rad nominal instead of letting the WBC correct it downstream.
   (12,12) 15.0    ; LF_HAA
   (13,13) 5.0     ; LF_HFE
   (14,14) 2.5     ; LF_KFE
@@ -384,7 +384,7 @@ frictionConeTask
 }
 
 ; NMPC-level soft box constraint on the 4 HAA joint angles. This is a sim
-; guard for the staged 0.43 rad stance-width experiment; it should be
+; guard for the staged 0.451 rad stance-width experiment; it should be
 ; re-derived from collision-distance logs instead of treated as a fixed
 ; mechanical truth. bound<=0 disables this constraint entirely.
 haaPositionLimit

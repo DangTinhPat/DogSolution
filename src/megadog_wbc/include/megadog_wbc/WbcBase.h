@@ -78,6 +78,10 @@ struct HierarchicalWbcConfig
     // task that would compete with swing XYZ tracking. Values are body-frame
     // lateral foot offsets; positive is robot-left.
     double swing_foot_lateral_target_blend = 0.0;
+    // Optional speed gate for the above shaping. When > 0, the target is only
+    // applied if the desired planar base speed is at least this value; this
+    // keeps trot-in-place from injecting independent lateral swing bias.
+    double swing_foot_lateral_min_planar_speed_m_s = 0.0;
     std::vector<double> swing_foot_lateral_nominal_y_m;
     // NOTE: deliberately no haa_posture_swing_scale field here (unlike
     // leg_posture_swing_scale below) - contact-gating this task the same
@@ -230,6 +234,7 @@ public:
 
     virtual vector_t update(const vector_t& stateDesired, const vector_t& inputDesired,
                             const vector_t& rbdStateMeasured, size_t mode, scalar_t period, scalar_t time);
+    void setSwingFootLateralCommandPlanarSpeed(scalar_t speed_m_s);
 
 protected:
     void updateMeasured(const vector_t& rbdStateMeasured);
@@ -269,6 +274,7 @@ private:
 
     vector_t qMeasured_, vMeasured_, inputLast_;
     vector_t qDesired_, vDesired_, baseAccDesired_;
+    scalar_t swingFootLateralCommandPlanarSpeed_ = std::numeric_limits<scalar_t>::quiet_NaN();
     // Raw one-tick finite difference of inputDesired (see updateDesired()),
     // used as feedforward for baseAccDesired_. inputDesired's per-leg
     // contact-force components can jump near-discontinuously across a
